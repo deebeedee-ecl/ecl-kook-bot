@@ -1,0 +1,17 @@
+{
+  "name": "ecl-bot",
+  "version": "1.0.0",
+  "description": "ECL KOOK Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.14.0",
+    "ws": "^8.20.0"
+  }
+}
