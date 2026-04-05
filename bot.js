@@ -1,11 +1,16 @@
+require("dotenv").config();
+
 const WebSocket = require("ws");
 const axios = require("axios");
 const zlib = require("zlib");
 
-// 🔑 PLACEHOLDER TOKEN
-const TOKEN = "1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==";
-
+const TOKEN = process.env.1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==;
 const API_BASE = "https://www.kookapp.cn/api/v3";
+
+if (!TOKEN) {
+  console.error("1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==");
+  process.exit(1);
+}
 
 async function sendChannelMessage(targetId, content) {
   try {
