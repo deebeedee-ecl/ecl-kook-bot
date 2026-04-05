@@ -4,11 +4,13 @@ const WebSocket = require("ws");
 const axios = require("axios");
 const zlib = require("zlib");
 
-const TOKEN = process.env.1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==;
+console.log("🚀 NEW VERSION IS RUNNING");
+
+const TOKEN = "1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==";
 const API_BASE = "https://www.kookapp.cn/api/v3";
 
 if (!TOKEN) {
-  console.error("1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==");
+  console.error("❌ Missing bot token");
   process.exit(1);
 }
 
@@ -79,6 +81,8 @@ async function startBot() {
   });
 
   ws.on("message", async (raw) => {
+    console.log("🔥 RAW MESSAGE RECEIVED");
+
     const packet = parsePacket(raw);
     if (!packet) return;
 
