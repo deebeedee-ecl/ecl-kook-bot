@@ -47,7 +47,7 @@ const confirmedMatches = [];
 let nextProposalId = 1;
 let nextMatchId = 1;
 
-if (!TOKEN || TOKEN === "1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==") {
+if (!TOKEN) {
   console.error("❌ Missing bot token");
   process.exit(1);
 }
