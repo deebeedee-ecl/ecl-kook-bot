@@ -8,7 +8,14 @@ console.log("🚀 NEW VERSION IS RUNNING");
 
 const TOKEN = "1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==";
 const API_BASE = "https://www.kookapp.cn/api/v3";
-const WELCOME_CHANNEL_ID = "1969692300297863"; // replace this with your real channel ID
+const WELCOME_CHANNEL_ID = "1969692300297863";
+
+const captains = {
+  "3149507900": {
+    teamName: "Test Team",
+    tag: "TEST",
+  },
+};
 
 if (!TOKEN) {
   console.error("❌ Missing bot token");
@@ -82,7 +89,10 @@ https://eclchina.lol`;
 
     console.log("✅ Welcome message sent");
   } catch (err) {
-    console.error("❌ Failed to send welcome message:", err.response?.data || err.message);
+    console.error(
+      "❌ Failed to send welcome message:",
+      err.response?.data || err.message
+    );
   }
 }
 
@@ -165,14 +175,15 @@ async function startBot() {
 
       console.log("📨 FULL EVENT:", JSON.stringify(event, null, 2));
 
-      // ----------------------------
       // 1. CHECK FOR USER JOIN EVENT
-      // ----------------------------
       if (event.type === 255) {
         console.log("📢 System event detected");
 
         if (event.extra) {
-          console.log("📢 System event extra:", JSON.stringify(event.extra, null, 2));
+          console.log(
+            "📢 System event extra:",
+            JSON.stringify(event.extra, null, 2)
+          );
         }
 
         if (event.extra && event.extra.type === "joined_guild") {
@@ -182,9 +193,7 @@ async function startBot() {
         }
       }
 
-      // ----------------------------
       // 2. NORMAL MESSAGE COMMANDS
-      // ----------------------------
       const rawContent =
         event?.extra?.kmarkdown?.raw_content ??
         event?.content ??
@@ -197,6 +206,22 @@ async function startBot() {
 
       if (content === "!ping") {
         await sendChannelMessage(event.target_id, "pong");
+      }
+
+      if (content === "!whoami") {
+        const captain = captains[event.author_id];
+
+        if (captain) {
+          await sendChannelMessage(
+            event.target_id,
+            `You are registered as captain of ${captain.teamName} [${captain.tag}].`
+          );
+        } else {
+          await sendChannelMessage(
+            event.target_id,
+            "Captain? No. Minion? Yes."
+          );
+        }
       }
     }
   });
