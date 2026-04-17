@@ -4,12 +4,30 @@ const WebSocket = require("ws");
 const axios = require("axios");
 const zlib = require("zlib");
 
-console.log("🚀 NEW VERSION IS RUNNING");
+console.log("🚀 ECL BOT STARTING");
 
-const TOKEN = process.env.KOOK_BOT_TOKEN || "1/NDY1Njk=/aF4Tn0nAGxyBEjkIJMP+yw==";
+const TOKEN = process.env.KOOK_BOT_TOKEN;
 const API_BASE = "https://www.kookapp.cn/api/v3";
+
+const WEBSITE_BASE_URL =
+  process.env.WEBSITE_BASE_URL || "https://eclchina.lol";
+const OCR_BASE_URL =
+  process.env.OCR_BASE_URL || "https://ecl-ocr-production.up.railway.app";
+const WEBSITE_API_TOKEN = process.env.WEBSITE_API_TOKEN || "";
+
 const WELCOME_CHANNEL_ID = "1969692300297863";
-const SCHEDULE_CHANNEL_ID = "6687085374683659";
+const CAPTAINS_CHAT_CHANNEL_ID = "8269169887027285";
+const ECL_HUB_CHANNEL_ID = "6687085374683659";
+
+const ALLOWED_COMMAND_CHANNEL_IDS = new Set([
+  CAPTAINS_CHAT_CHANNEL_ID,
+  ECL_HUB_CHANNEL_ID,
+]);
+
+const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const OCR_TIMEOUT_MS = 180 * 1000;
+const WEBSITE_TIMEOUT_MS = 30 * 1000;
+const RECONNECT_DELAY_MS = 5000;
 
 // =============================
 // ADMINS
@@ -18,74 +36,112 @@ const admins = {
   "3149507900": {
     nickname: "dbd",
     roleLabel: "Head Admin",
+    supreme: true,
   },
   "2980365563": {
     nickname: "Soul",
     roleLabel: "ECL Admin",
+    supreme: false,
   },
   "2789357366": {
     nickname: "Joe",
     roleLabel: "ECL Admin",
+    supreme: false,
   },
 };
 
 // =============================
-// CAPTAINS / TEAMS
+// TEAMS / CAPTAINS / TEAM IDS
 // =============================
-const captains = {
-  "2796070748": {
-    nickname: "Dixon",
-    teamName: "Bean In Your Mum",
+const teamsByTag = {
+  BIY: {
     tag: "BIY",
+    teamName: "Bean In Your Mum",
+    teamId: "9a25fe77-db90-4bde-9918-6c34a69e2a8d",
+    captainId: "2796070748",
+    captainNickname: "Dixon",
   },
-  "2181323461": {
-    nickname: "Shidian",
-    teamName: "NiuNiuPower",
+  NIU: {
     tag: "NIU",
+    teamName: "NiuNiuPower",
+    teamId: "3a935485-b3fc-4c4e-9c0a-7184f8f01e60",
+    captainId: "3933904036",
+    captainNickname: "Zeus",
   },
-  "2831795126": {
-    nickname: "Poopswag",
-    teamName: "Zycope & Friends",
+  ZAF: {
     tag: "ZAF",
+    teamName: "Zycope & Friends",
+    teamId: "9011e35c-0268-4503-bd56-0ee86879ce5e",
+    captainId: "2831795126",
+    captainNickname: "Poopswag",
   },
-  "1405022101": {
-    nickname: "Sheniqua",
-    teamName: "Make France Great Again",
+  MFG: {
     tag: "MFG",
+    teamName: "Make France Great Again",
+    teamId: "4ec54c7e-3762-4336-a7fc-8be88688e26d",
+    captainId: "1405022101",
+    captainNickname: "Sheniqua",
   },
-  "3741548599": {
-    nickname: "Bunnieh",
-    teamName: "Exiled Bunzz",
+  EB: {
     tag: "EB",
+    teamName: "Exiled Bunzz",
+    teamId: "e0ea817b-a770-44fe-81ff-9f3906875e83",
+    captainId: "3557600370",
+    captainNickname: "Exile",
   },
-  "2522160383": {
-    nickname: "Flan",
-    teamName: "Flanmingos",
+  FLA: {
     tag: "FLA",
+    teamName: "Flanmingos",
+    teamId: "0ce4c650-b196-44ba-baf8-31928e1c48bc",
+    captainId: "2522160383",
+    captainNickname: "Flan",
   },
 };
+
+const teams = Object.values(teamsByTag);
+
+const captainsByUserId = {};
+for (const team of teams) {
+  captainsByUserId[team.captainId] = {
+    nickname: team.captainNickname,
+    teamName: team.teamName,
+    tag: team.tag,
+    teamId: team.teamId,
+  };
+}
 
 // =============================
 // TEMP STORAGE (resets on restart)
 // =============================
 const scheduleSessions = {};
 const cancelSessions = {};
-const reportSessions = {};
+const resultSessions = {};
+const resendSessions = {};
 const proposals = [];
-const confirmedMatches = [];
 const reports = [];
+const submittedGames = {}; // key: `${matchId}:${gameNumber}`
 
 let nextProposalId = 1;
-let nextMatchId = 1;
 let nextReportId = 1;
 
 if (!TOKEN) {
-  console.error("❌ Missing bot token");
+  console.error("❌ Missing KOOK_BOT_TOKEN");
   process.exit(1);
+}
+
+// =============================
+// HELPERS
+// =============================
+function nowMs() {
+  return Date.now();
 }
 
 function isAdmin(userId) {
   return !!admins[String(userId)];
+}
+
+function isSupremeAdmin(userId) {
+  return !!admins[String(userId)]?.supreme;
 }
 
 function getAdmin(userId) {
@@ -93,101 +149,65 @@ function getAdmin(userId) {
 }
 
 function getCaptain(userId) {
-  return captains[String(userId)] || null;
+  return captainsByUserId[String(userId)] || null;
 }
 
-function getAvailableOpponents(authorId) {
-  const myCaptain = getCaptain(authorId);
-  if (!myCaptain) return [];
-
-  return Object.entries(captains)
-    .filter(([userId]) => String(userId) !== String(authorId))
-    .map(([userId, captain]) => ({
-      userId,
-      nickname: captain.nickname,
-      teamName: captain.teamName,
-      tag: captain.tag,
-    }));
+function isCaptain(userId) {
+  return !!getCaptain(userId);
 }
 
-function getMyScheduledMatches(authorId) {
-  const captain = getCaptain(authorId);
-  if (!captain) return [];
-
-  return confirmedMatches.filter(
-    (match) =>
-      match.status === "scheduled" &&
-      (match.teamA === captain.teamName || match.teamB === captain.teamName)
-  );
+function isAdminOrCaptain(userId) {
+  return isAdmin(userId) || isCaptain(userId);
 }
 
-function getAccessibleMatchesForCancel(authorId) {
-  if (isAdmin(authorId)) {
-    return confirmedMatches.filter((match) => match.status === "scheduled");
+function makeSession(step, extra = {}) {
+  return {
+    step,
+    createdAt: nowMs(),
+    updatedAt: nowMs(),
+    ...extra,
+  };
+}
+
+function touchSession(session) {
+  if (!session) return session;
+  session.updatedAt = nowMs();
+  return session;
+}
+
+function isSessionExpired(session) {
+  if (!session) return true;
+  return nowMs() - (session.updatedAt || session.createdAt || 0) > SESSION_TIMEOUT_MS;
+}
+
+function cleanupExpiredSessions() {
+  const buckets = [scheduleSessions, cancelSessions, resultSessions, resendSessions];
+
+  for (const bucket of buckets) {
+    for (const userId of Object.keys(bucket)) {
+      if (isSessionExpired(bucket[userId])) {
+        delete bucket[userId];
+      }
+    }
   }
-
-  return getMyScheduledMatches(authorId);
 }
 
-function getAccessibleMatchesForReport(authorId) {
-  if (isAdmin(authorId)) {
-    return confirmedMatches.filter((match) => match.status === "scheduled");
-  }
-
-  return getMyScheduledMatches(authorId);
+function isDirectMessageEvent(event) {
+  return !event?.extra?.guild_id;
 }
 
-function formatCommands() {
-  return `📘 ECL Bot Commands / 指令列表
-
-General / 通用:
-• !ping
-• !commands
-• !whoami
-• !captains
-• !teams
-
-Scheduling / 赛程:
-• !schedule
-• !cancel
-
-Reporting / 赛果上报:
-• !report
-
-Views / 查看:
-• !proposals
-• !matches
-• !reports`;
+function isAllowedCommandContext(event) {
+  if (isDirectMessageEvent(event)) return true;
+  const targetId = String(event.target_id || "");
+  return ALLOWED_COMMAND_CHANNEL_IDS.has(targetId);
 }
 
-function formatProposal(proposal) {
-  return `Proposal #${proposal.id}
-${proposal.fromTeam} [${proposal.fromTag}] vs ${proposal.toTeam} [${proposal.toTag}]
-Time / 时间: ${proposal.dateTime}
-Format / 赛制: ${proposal.format}
-Status / 状态: ${proposal.status}`;
+function getAvailableOpponentsByTag(excludeTag) {
+  return teams.filter((team) => team.tag !== excludeTag);
 }
 
-function formatMatch(match) {
-  return `Match #${match.id}
-${match.teamA} [${match.tagA}] vs ${match.teamB} [${match.tagB}]
-Time / 时间: ${match.dateTime}
-Format / 赛制: ${match.format}
-Status / 状态: ${match.status}`;
-}
-
-function formatReport(report) {
-  return `Report #${report.id}
-Match #${report.matchId}
-Game / 第几局: ${report.gameNumber}
-Reporter / 提交人: ${report.reporterName}
-Screenshot / 截图: ${report.screenshotUrl}
-Note / 备注: ${report.note}
-Status / 状态: ${report.status}`;
-}
-
-function isValidDateTime(input) {
-  return /^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(input);
+function getAllTeamsSorted() {
+  return [...teams].sort((a, b) => a.teamName.localeCompare(b.teamName));
 }
 
 function getFormatOptions() {
@@ -200,6 +220,225 @@ function getGameCountFromFormat(format) {
   if (format === "BO3") return 3;
   if (format === "BO5") return 5;
   return 1;
+}
+
+function getBestOfFromFormat(format) {
+  return getGameCountFromFormat(format);
+}
+
+function getPublicGameLabel(gameNumber) {
+  return `G${String(gameNumber).padStart(3, "0")}`;
+}
+
+function getSubmittedGameKey(matchId, gameNumber) {
+  return `${matchId}:${gameNumber}`;
+}
+
+function markGameSubmitted(matchId, gameNumber, extra = {}) {
+  submittedGames[getSubmittedGameKey(matchId, gameNumber)] = {
+    status: "submitted",
+    updatedAt: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+function markGameFailed(matchId, gameNumber, extra = {}) {
+  submittedGames[getSubmittedGameKey(matchId, gameNumber)] = {
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+function getGameSubmissionState(matchId, gameNumber) {
+  return submittedGames[getSubmittedGameKey(matchId, gameNumber)] || null;
+}
+
+function getMonthOptions() {
+  return [
+    { label: "April", month: 4 },
+    { label: "May", month: 5 },
+  ];
+}
+
+function getDayOptions(month) {
+  if (month === 4) {
+    return Array.from({ length: 11 }, (_, i) => 20 + i); // 20-30
+  }
+  if (month === 5) {
+    return Array.from({ length: 20 }, (_, i) => 1 + i); // 1-20
+  }
+  return [];
+}
+
+function getTimeOptions() {
+  const options = [];
+  let hour = 14;
+  let minute = 0;
+
+  while (hour < 24 || (hour === 24 && minute === 0)) {
+    const displayHour = hour === 24 ? 0 : hour;
+    const hh = String(displayHour).padStart(2, "0");
+    const mm = String(minute).padStart(2, "0");
+    options.push(`${hh}:${mm}`);
+
+    minute += 30;
+    if (minute >= 60) {
+      minute = 0;
+      hour += 1;
+    }
+    if (hour === 24 && minute > 0) break;
+  }
+
+  if (!options.includes("00:00")) {
+    options.push("00:00");
+  }
+
+  return options;
+}
+
+function formatLocalDateTime(dateObj) {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(dateObj);
+  } catch {
+    return dateObj.toISOString();
+  }
+}
+
+function buildShanghaiIsoFromSelection(month, day, timeStr) {
+  const [hourStr, minuteStr] = timeStr.split(":");
+  const monthPadded = String(month).padStart(2, "0");
+  const dayPadded = String(day).padStart(2, "0");
+
+  const source = `2026-${monthPadded}-${dayPadded}T${hourStr}:${minuteStr}:00+08:00`;
+  return new Date(source).toISOString();
+}
+
+function formatScheduleDisplay(month, day, timeStr) {
+  const monthName = month === 4 ? "April" : "May";
+  return `${monthName} ${day}, 2026 — ${timeStr}`;
+}
+
+function formatCommands() {
+  return `📘 ECL Bot Commands / 指令列表
+
+General / 通用:
+• !ping
+• !status
+• !commands
+• !help
+• !me
+• !captains
+• !teams
+
+Public info / 信息:
+• !matches
+• !mygames
+• !leaderboard
+• !standings
+
+Scheduling / 赛程:
+• !schedule
+• !accept PROPOSAL_ID
+• !reject PROPOSAL_ID
+• !cancel
+• !unschedule
+
+Results / 赛果:
+• !result
+• !report
+• !resend
+
+Admin / 管理:
+• Head Admin can schedule, cancel, submit, and resend any game.`;
+}
+
+function formatProposal(proposal) {
+  return `Proposal #${proposal.id}
+${proposal.fromTeam} [${proposal.fromTag}] vs ${proposal.toTeam} [${proposal.toTag}]
+Time / 时间: ${proposal.scheduleDisplay}
+Format / 赛制: ${proposal.format}
+Status / 状态: ${proposal.status}`;
+}
+
+function formatLiveMatch(match) {
+  const displayTime = match.scheduledAt
+    ? formatLocalDateTime(new Date(match.scheduledAt))
+    : "Not scheduled";
+
+  const format = `BO${match.bestOf || 1}`;
+
+  return `${match.homeTeam?.name || "Unknown"} vs ${match.awayTeam?.name || "Unknown"} — ${displayTime} — ${format}`;
+}
+
+function formatPublicStandingsRow(row) {
+  const diff = row.diff > 0 ? `+${row.diff}` : `${row.diff}`;
+  return `${row.rank}. ${row.teamName} — P:${row.played} | GW:${row.gameW}-${row.gameL} | Diff:${diff} | Pts:${row.points}`;
+}
+
+function formatPublicLeaderboardRow(row) {
+  return `${row.rank}. ${row.name} [${row.teamTag}] — ${row.elo} ELO | GP:${row.gamesPlayed} | WR:${row.winRate} | KDA:${row.kda} | MVP:${row.mvpCount} | ${row.streakLabel}`;
+}
+
+function getUserDisplayName(userId) {
+  const admin = getAdmin(userId);
+  if (admin) return `${admin.nickname} (${admin.roleLabel})`;
+
+  const captain = getCaptain(userId);
+  if (captain) {
+    return `${captain.nickname} — ${captain.teamName} [${captain.tag}]`;
+  }
+
+  return `User ${userId}`;
+}
+
+function extractTextContent(event) {
+  const rawContent =
+    event?.extra?.kmarkdown?.raw_content ??
+    event?.content ??
+    "";
+
+  return String(rawContent || "").trim();
+}
+
+function extractImageUrlFromText(text) {
+  const match = text.match(/https?:\/\/\S+/i);
+  return match ? match[0] : null;
+}
+
+function extractImageUrlFromEvent(event) {
+  const text = extractTextContent(event);
+  const urlFromText = extractImageUrlFromText(text);
+  if (urlFromText) return urlFromText;
+
+  const attachments =
+    event?.extra?.attachments ||
+    event?.attachments ||
+    [];
+
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    const first = attachments[0];
+    return (
+      first?.url ||
+      first?.download_url ||
+      first?.src ||
+      null
+    );
+  }
+
+  const extra = event?.extra || {};
+  if (extra?.attachment?.url) return extra.attachment.url;
+  if (extra?.attachment?.download_url) return extra.attachment.download_url;
+
+  return null;
 }
 
 async function sendChannelMessage(targetId, content) {
@@ -216,11 +455,14 @@ async function sendChannelMessage(targetId, content) {
           Authorization: `Bot ${TOKEN}`,
           "Content-Type": "application/json",
         },
+        timeout: 15000,
       }
     );
-    console.log("✅ Sent:", content);
+    console.log("✅ Channel message sent");
+    return true;
   } catch (err) {
-    console.error("Send message error:", err.response?.data || err.message);
+    console.error("Send channel message error:", err.response?.data || err.message);
+    return false;
   }
 }
 
@@ -238,6 +480,7 @@ async function sendPrivateMessage(userId, content) {
           Authorization: `Bot ${TOKEN}`,
           "Content-Type": "application/json",
         },
+        timeout: 15000,
       }
     );
     console.log(`✅ DM sent to ${userId}`);
@@ -246,6 +489,16 @@ async function sendPrivateMessage(userId, content) {
     console.error("DM send error:", err.response?.data || err.message);
     return false;
   }
+}
+
+async function replyToEvent(event, content) {
+  const authorId = String(event.author_id);
+
+  if (isDirectMessageEvent(event)) {
+    return sendPrivateMessage(authorId, content);
+  }
+
+  return sendChannelMessage(String(event.target_id), content);
 }
 
 async function sendWelcomeMessage() {
@@ -276,27 +529,9 @@ Find a team or sign up as a free agent:
 
 https://eclchina.lol`;
 
-    await axios.post(
-      `${API_BASE}/message/create`,
-      {
-        target_id: WELCOME_CHANNEL_ID,
-        content: welcomeMessage,
-        type: 1,
-      },
-      {
-        headers: {
-          Authorization: `Bot ${TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    console.log("✅ Welcome message sent");
+    await sendChannelMessage(WELCOME_CHANNEL_ID, welcomeMessage);
   } catch (err) {
-    console.error(
-      "❌ Failed to send welcome message:",
-      err.response?.data || err.message
-    );
+    console.error("❌ Failed to send welcome message:", err.message);
   }
 }
 
@@ -306,6 +541,7 @@ async function getGateway() {
       headers: {
         Authorization: `Bot ${TOKEN}`,
       },
+      timeout: 15000,
     });
 
     let gatewayUrl = res.data.data.url;
@@ -313,7 +549,7 @@ async function getGateway() {
     return gatewayUrl;
   } catch (err) {
     console.error("Gateway error:", err.response?.data || err.message);
-    process.exit(1);
+    throw err;
   }
 }
 
@@ -331,13 +567,1342 @@ function parsePacket(raw) {
   }
 }
 
+function getWebsiteHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+  };
+
+  if (WEBSITE_API_TOKEN) {
+    headers.Authorization = `Bearer ${WEBSITE_API_TOKEN}`;
+  }
+
+  return headers;
+}
+
+async function websiteGet(path) {
+  const url = `${WEBSITE_BASE_URL}${path}`;
+  const res = await axios.get(url, {
+    headers: getWebsiteHeaders(),
+    timeout: WEBSITE_TIMEOUT_MS,
+  });
+  return res.data;
+}
+
+async function websitePost(path, body) {
+  const url = `${WEBSITE_BASE_URL}${path}`;
+  const res = await axios.post(url, body, {
+    headers: getWebsiteHeaders(),
+    timeout: WEBSITE_TIMEOUT_MS,
+  });
+  return res.data;
+}
+
+async function websitePatch(path, body) {
+  const url = `${WEBSITE_BASE_URL}${path}`;
+  const res = await axios.patch(url, body, {
+    headers: getWebsiteHeaders(),
+    timeout: WEBSITE_TIMEOUT_MS,
+  });
+  return res.data;
+}
+
+async function websiteDelete(path) {
+  const url = `${WEBSITE_BASE_URL}${path}`;
+  const res = await axios.delete(url, {
+    headers: getWebsiteHeaders(),
+    timeout: WEBSITE_TIMEOUT_MS,
+  });
+  return res.data;
+}
+
+async function fetchAllMatches() {
+  const matches = await websiteGet("/api/matches");
+  return Array.isArray(matches) ? matches : [];
+}
+
+async function fetchScheduledMatches() {
+  const matches = await fetchAllMatches();
+  return matches.filter((match) => match.status === "SCHEDULED");
+}
+
+function getMatchesForCaptain(matches, captain) {
+  if (!captain) return [];
+  return matches.filter(
+    (match) =>
+      match.homeTeamId === captain.teamId || match.awayTeamId === captain.teamId
+  );
+}
+
+function canUserAccessMatch(userId, match) {
+  if (isAdmin(userId)) return true;
+  const captain = getCaptain(userId);
+  if (!captain) return false;
+  return match.homeTeamId === captain.teamId || match.awayTeamId === captain.teamId;
+}
+
+async function createRealMatch({
+  homeTeam,
+  awayTeam,
+  format,
+  scheduledIso,
+  notes,
+}) {
+  return websitePost("/api/matches", {
+    homeTeamId: homeTeam.teamId,
+    awayTeamId: awayTeam.teamId,
+    stage: "REGULAR_SEASON",
+    bestOf: getBestOfFromFormat(format),
+    scheduledAt: scheduledIso,
+    status: "SCHEDULED",
+    notes: notes || "Created via KOOK bot",
+  });
+}
+
+async function cancelRealMatch(matchId, cancelledByUserId) {
+  try {
+    return await websitePatch(`/api/matches/${matchId}`, {
+      status: "CANCELLED",
+      notes: `Cancelled via KOOK bot by ${getUserDisplayName(cancelledByUserId)}`,
+    });
+  } catch (err) {
+    console.warn("PATCH cancel failed, attempting DELETE fallback");
+    return websiteDelete(`/api/matches/${matchId}`);
+  }
+}
+
+async function callOcr(matchId, gameNumber, screenshotUrl) {
+  const url = `${OCR_BASE_URL}/ocr`;
+  const res = await axios.post(
+    url,
+    {
+      matchId,
+      gameNumber,
+      screenshotUrl,
+    },
+    {
+      timeout: OCR_TIMEOUT_MS,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    }
+  );
+  return res.data;
+}
+
+async function fetchStandings() {
+  const data = await websiteGet("/api/standings");
+  return Array.isArray(data) ? data : [];
+}
+
+async function fetchLeaderboard() {
+  const data = await websiteGet("/api/leaderboard");
+  return Array.isArray(data) ? data : [];
+}
+
+function formatCaptainsList() {
+  return teams
+    .map(
+      (team) =>
+        `• ${team.captainNickname} — ${team.teamName} [${team.tag}]`
+    )
+    .join("\n");
+}
+
+function formatTeamsList() {
+  return teams.map((team) => `• ${team.teamName} [${team.tag}]`).join("\n");
+}
+
+async function announceMatchScheduled(match) {
+  await sendChannelMessage(
+    CAPTAINS_CHAT_CHANNEL_ID,
+    `📅 Match Scheduled! / 比赛已安排！\n${formatLiveMatch(match)}`
+  );
+}
+
+async function announceMatchCancelled(match) {
+  await sendChannelMessage(
+    CAPTAINS_CHAT_CHANNEL_ID,
+    `🛑 Match Cancelled! / 比赛已取消！\n${formatLiveMatch(match)}`
+  );
+}
+
+function getGameStatusLabel(matchId, gameNumber) {
+  const state = getGameSubmissionState(matchId, gameNumber);
+  if (!state) return "pending";
+  return state.status || "pending";
+}
+
+function buildGameOptionsMessage(match, gameCount) {
+  const lines = [];
+  for (let i = 1; i <= gameCount; i++) {
+    const label = getPublicGameLabel(i);
+    const status = getGameStatusLabel(match.id, i);
+    lines.push(`${i}. ${label} — ${status}`);
+  }
+  return lines.join("\n");
+}
+
+function getScheduleSummary({ homeTeam, awayTeam, month, day, timeStr, format }) {
+  return `${homeTeam.teamName} [${homeTeam.tag}] vs ${awayTeam.teamName} [${awayTeam.tag}]
+Time / 时间: ${formatScheduleDisplay(month, day, timeStr)}
+Format / 赛制: ${format}`;
+}
+
+// =============================
+// FLOW HANDLERS
+// =============================
+async function startScheduleFlow(event, authorId) {
+  const admin = getAdmin(authorId);
+  const captain = getCaptain(authorId);
+
+  if (!admin && !captain) {
+    await replyToEvent(
+      event,
+      "Only admins or captains can schedule matches.\n只有管理员或队长可以安排比赛。"
+    );
+    return;
+  }
+
+  if (admin) {
+    const teamOptions = getAllTeamsSorted();
+
+    scheduleSessions[authorId] = makeSession("choose_home_team", {
+      isAdminFlow: true,
+      teamOptions,
+    });
+
+    const message = teamOptions
+      .map((team, index) => `${index + 1}. ${team.teamName} [${team.tag}]`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Choose the first team / 请选择第一支队伍：\n\n${message}\n\nReply with a number / 回复对应数字。`
+    );
+    return;
+  }
+
+  const opponents = getAvailableOpponentsByTag(captain.tag);
+
+  scheduleSessions[authorId] = makeSession("choose_opponent", {
+    isAdminFlow: false,
+    homeTeam: teamsByTag[captain.tag],
+    opponents,
+  });
+
+  const message = opponents
+    .map((team, index) => `${index + 1}. ${team.teamName} [${team.tag}]`)
+    .join("\n");
+
+  await replyToEvent(
+    event,
+    `Choose the opposing team / 请选择对手队伍：\n\n${message}\n\nReply with a number / 回复对应数字。`
+  );
+}
+
+async function handleScheduleSession(event, authorId, content) {
+  const session = scheduleSessions[authorId];
+  if (!session) return false;
+
+  if (isSessionExpired(session)) {
+    delete scheduleSessions[authorId];
+    await replyToEvent(
+      event,
+      "Your scheduling session expired. Please start again with !schedule.\n你的排期会话已过期，请重新输入 !schedule。"
+    );
+    return true;
+  }
+
+  touchSession(session);
+
+  if (session.step === "choose_home_team") {
+    const choice = Number(content);
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.teamOptions.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with a team number.\n无效选择，请回复队伍编号。"
+      );
+      return true;
+    }
+
+    const homeTeam = session.teamOptions[choice - 1];
+    const opponents = getAvailableOpponentsByTag(homeTeam.tag);
+
+    scheduleSessions[authorId] = makeSession("choose_opponent", {
+      isAdminFlow: true,
+      homeTeam,
+      opponents,
+    });
+
+    const message = opponents
+      .map((team, index) => `${index + 1}. ${team.teamName} [${team.tag}]`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Choose the opposing team / 请选择对手队伍：\n\n${message}\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_opponent") {
+    const choice = Number(content);
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.opponents.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with a team number.\n无效选择，请回复队伍编号。"
+      );
+      return true;
+    }
+
+    const awayTeam = session.opponents[choice - 1];
+
+    scheduleSessions[authorId] = makeSession("choose_month", {
+      ...session,
+      homeTeam: session.homeTeam,
+      awayTeam,
+    });
+
+    await replyToEvent(
+      event,
+      `Choose month / 请选择月份：\n\n1. April\n2. May\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_month") {
+    const choice = Number(content);
+    const monthOptions = getMonthOptions();
+
+    if (!Number.isInteger(choice) || choice < 1 || choice > monthOptions.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with 1 or 2.\n无效选择，请回复 1 或 2。"
+      );
+      return true;
+    }
+
+    const month = monthOptions[choice - 1].month;
+    const dayOptions = getDayOptions(month);
+
+    scheduleSessions[authorId] = makeSession("choose_day", {
+      ...session,
+      month,
+      dayOptions,
+    });
+
+    const dayMessage = dayOptions
+      .map((day, index) => `${index + 1}. ${day}`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Choose day / 请选择日期：\n\n${dayMessage}\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_day") {
+    const choice = Number(content);
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.dayOptions.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with a day number from the list.\n无效选择，请回复列表中的日期编号。"
+      );
+      return true;
+    }
+
+    const day = session.dayOptions[choice - 1];
+    const timeOptions = getTimeOptions();
+
+    scheduleSessions[authorId] = makeSession("choose_time", {
+      ...session,
+      day,
+      timeOptions,
+    });
+
+    const timeMessage = timeOptions
+      .map((time, index) => `${index + 1}. ${time}`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Choose time / 请选择时间：\n\n${timeMessage}\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_time") {
+    const choice = Number(content);
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.timeOptions.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with a time number from the list.\n无效选择，请回复列表中的时间编号。"
+      );
+      return true;
+    }
+
+    const timeStr = session.timeOptions[choice - 1];
+    const formats = getFormatOptions();
+
+    scheduleSessions[authorId] = makeSession("choose_format", {
+      ...session,
+      timeStr,
+      formats,
+    });
+
+    const formatMessage = formats
+      .map((format, index) => `${index + 1}. ${format}`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Choose format / 请选择赛制：\n\n${formatMessage}\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_format") {
+    const choice = Number(content);
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.formats.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with a format number.\n无效选择，请回复赛制编号。"
+      );
+      return true;
+    }
+
+    const format = session.formats[choice - 1];
+
+    scheduleSessions[authorId] = makeSession("confirm_schedule", {
+      ...session,
+      format,
+    });
+
+    const summary = getScheduleSummary({
+      homeTeam: session.homeTeam,
+      awayTeam: session.awayTeam,
+      month: session.month,
+      day: session.day,
+      timeStr: session.timeStr,
+      format,
+    });
+
+    await replyToEvent(
+      event,
+      `Confirm schedule / 请确认赛程：\n\n${summary}\n\nReply with:\nconfirm\nor\ncancel`
+    );
+    return true;
+  }
+
+  if (session.step === "confirm_schedule") {
+    const lowered = content.toLowerCase();
+
+    if (lowered === "cancel") {
+      delete scheduleSessions[authorId];
+      await replyToEvent(event, "Scheduling cancelled.\n已取消排期。");
+      return true;
+    }
+
+    if (lowered !== "confirm") {
+      await replyToEvent(
+        event,
+        "Reply with confirm or cancel.\n请回复 confirm 或 cancel。"
+      );
+      return true;
+    }
+
+    const scheduledIso = buildShanghaiIsoFromSelection(
+      session.month,
+      session.day,
+      session.timeStr
+    );
+
+    // Admin flow creates match directly.
+    if (session.isAdminFlow) {
+      try {
+        const match = await createRealMatch({
+          homeTeam: session.homeTeam,
+          awayTeam: session.awayTeam,
+          format: session.format,
+          scheduledIso,
+          notes: `Created by ${getUserDisplayName(authorId)} via KOOK bot`,
+        });
+
+        delete scheduleSessions[authorId];
+
+        await replyToEvent(
+          event,
+          `✅ Match created successfully.\n${formatLiveMatch(match)}`
+        );
+
+        await announceMatchScheduled(match);
+      } catch (err) {
+        console.error("Create match error:", err.response?.data || err.message);
+        await replyToEvent(
+          event,
+          "❌ Failed to create the match in the website system. Please contact admin."
+        );
+      }
+
+      return true;
+    }
+
+    // Captain flow creates proposal, then DM opposing captain.
+    const proposal = {
+      id: nextProposalId++,
+      fromCaptainId: authorId,
+      fromTeam: session.homeTeam.teamName,
+      fromTag: session.homeTeam.tag,
+      fromTeamId: session.homeTeam.teamId,
+      toCaptainId: session.awayTeam.captainId,
+      toTeam: session.awayTeam.teamName,
+      toTag: session.awayTeam.tag,
+      toTeamId: session.awayTeam.teamId,
+      month: session.month,
+      day: session.day,
+      timeStr: session.timeStr,
+      scheduledIso,
+      scheduleDisplay: formatScheduleDisplay(session.month, session.day, session.timeStr),
+      format: session.format,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    };
+
+    proposals.push(proposal);
+    delete scheduleSessions[authorId];
+
+    await replyToEvent(
+      event,
+      `✅ Proposal sent / 对局申请已发送。\n${formatProposal(proposal)}`
+    );
+
+    const dmWorked = await sendPrivateMessage(
+      proposal.toCaptainId,
+      `📩 Match proposal received / 收到比赛申请
+
+${proposal.fromTeam} [${proposal.fromTag}] wants to play your team ${proposal.toTeam} [${proposal.toTag}].
+${proposal.fromTeam} [${proposal.fromTag}] 想和你的队伍 ${proposal.toTeam} [${proposal.toTag}] 进行比赛。
+
+Proposed time / 提议时间:
+${proposal.scheduleDisplay}
+
+Format / 赛制:
+${proposal.format}
+
+Reply with / 回复以下指令:
+!accept ${proposal.id}
+or
+!reject ${proposal.id}`
+    );
+
+    if (!dmWorked) {
+      await sendChannelMessage(
+        CAPTAINS_CHAT_CHANNEL_ID,
+        `📩 Captain approval needed / 需要队长确认\n${formatProposal(proposal)}\n\nOpposing captain can reply with:\n!accept ${proposal.id}\n!reject ${proposal.id}`
+      );
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+async function startCancelFlow(event, authorId) {
+  if (!isAdminOrCaptain(authorId)) {
+    await replyToEvent(
+      event,
+      "Only admins or captains can cancel matches.\n只有管理员或队长可以取消比赛。"
+    );
+    return;
+  }
+
+  try {
+    const scheduledMatches = await fetchScheduledMatches();
+    const accessibleMatches = isAdmin(authorId)
+      ? scheduledMatches
+      : getMatchesForCaptain(scheduledMatches, getCaptain(authorId));
+
+    if (accessibleMatches.length === 0) {
+      await replyToEvent(
+        event,
+        "No scheduled matches available to cancel.\n目前没有可取消的已安排比赛。"
+      );
+      return;
+    }
+
+    cancelSessions[authorId] = makeSession("choose_match", {
+      matches: accessibleMatches,
+    });
+
+    const message = accessibleMatches
+      .map((match, index) => `${index + 1}. ${formatLiveMatch(match)}`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `Which match do you want to cancel?\n你想取消哪一场比赛？\n\n${message}\n\nReply with a number / 回复对应数字。`
+    );
+  } catch (err) {
+    console.error("Start cancel flow error:", err.response?.data || err.message);
+    await replyToEvent(
+      event,
+      "❌ Failed to load scheduled matches. Please try again."
+    );
+  }
+}
+
+async function handleCancelSession(event, authorId, content) {
+  const session = cancelSessions[authorId];
+  if (!session) return false;
+
+  if (isSessionExpired(session)) {
+    delete cancelSessions[authorId];
+    await replyToEvent(
+      event,
+      "Your cancel session expired. Please start again with !cancel.\n你的取消会话已过期，请重新输入 !cancel。"
+    );
+    return true;
+  }
+
+  touchSession(session);
+
+  if (session.step === "choose_match") {
+    const choice = Number(content);
+
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.matches.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with the match number from the list.\n无效选择，请回复列表中的比赛编号。"
+      );
+      return true;
+    }
+
+    const selectedMatch = session.matches[choice - 1];
+
+    if (!canUserAccessMatch(authorId, selectedMatch)) {
+      await replyToEvent(
+        event,
+        "You do not have permission to cancel this match.\n你没有权限取消这场比赛。"
+      );
+      return true;
+    }
+
+    try {
+      await cancelRealMatch(selectedMatch.id, authorId);
+      delete cancelSessions[authorId];
+
+      await replyToEvent(
+        event,
+        `🛑 Match cancelled successfully.\n${formatLiveMatch(selectedMatch)}`
+      );
+
+      await announceMatchCancelled(selectedMatch);
+    } catch (err) {
+      console.error("Cancel match error:", err.response?.data || err.message);
+      await replyToEvent(
+        event,
+        "❌ Failed to cancel the match in the website system."
+      );
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+async function startResultFlow(event, authorId, isResend = false) {
+  if (!isAdminOrCaptain(authorId)) {
+    await replyToEvent(
+      event,
+      "Only admins or captains can submit results.\n只有管理员或队长可以提交赛果。"
+    );
+    return;
+  }
+
+  if (isResend && !isAdmin(authorId)) {
+    await replyToEvent(
+      event,
+      "!resend is admin only.\n只有管理员可以使用 !resend。"
+    );
+    return;
+  }
+
+  try {
+    const scheduledMatches = await fetchScheduledMatches();
+    const accessibleMatches = isAdmin(authorId)
+      ? scheduledMatches
+      : getMatchesForCaptain(scheduledMatches, getCaptain(authorId));
+
+    if (accessibleMatches.length === 0) {
+      await replyToEvent(
+        event,
+        "No scheduled matches available.\n目前没有可上报的已安排比赛。"
+      );
+      return;
+    }
+
+    const bucket = isResend ? resendSessions : resultSessions;
+    bucket[authorId] = makeSession("choose_match", {
+      matches: accessibleMatches,
+      isResend,
+    });
+
+    const message = accessibleMatches
+      .map((match, index) => `${index + 1}. ${formatLiveMatch(match)}`)
+      .join("\n");
+
+    await replyToEvent(
+      event,
+      `${isResend ? "Which match do you want to resend?" : "Which match are you reporting?"}
+${isResend ? "你要重传哪一场比赛？" : "你要上报哪一场比赛？"}
+
+${message}
+
+Reply with a number / 回复对应数字。`
+    );
+  } catch (err) {
+    console.error("Start result flow error:", err.response?.data || err.message);
+    await replyToEvent(
+      event,
+      "❌ Failed to load scheduled matches. Please try again."
+    );
+  }
+}
+
+async function handleResultLikeSession(event, authorId, content, isResend = false) {
+  const bucket = isResend ? resendSessions : resultSessions;
+  const session = bucket[authorId];
+  if (!session) return false;
+
+  if (isSessionExpired(session)) {
+    delete bucket[authorId];
+    await replyToEvent(
+      event,
+      `Your ${isResend ? "resend" : "result"} session expired. Please start again with ${isResend ? "!resend" : "!result"}.\n你的会话已过期，请重新开始。`
+    );
+    return true;
+  }
+
+  touchSession(session);
+
+  if (session.step === "choose_match") {
+    const choice = Number(content);
+
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.matches.length) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with the match number from the list.\n无效选择，请回复列表中的比赛编号。"
+      );
+      return true;
+    }
+
+    const selectedMatch = session.matches[choice - 1];
+    const gameCount = Number(selectedMatch.bestOf || 1);
+
+    bucket[authorId] = makeSession("choose_game", {
+      ...session,
+      selectedMatch,
+      gameCount,
+    });
+
+    const gameOptions = buildGameOptionsMessage(selectedMatch, gameCount);
+
+    await replyToEvent(
+      event,
+      `Which game?\n你要上报哪一局？\n\n${gameOptions}\n\nReply with a number / 回复对应数字。`
+    );
+    return true;
+  }
+
+  if (session.step === "choose_game") {
+    const choice = Number(content);
+
+    if (!Number.isInteger(choice) || choice < 1 || choice > session.gameCount) {
+      await replyToEvent(
+        event,
+        "Invalid choice. Reply with the game number.\n无效选择，请回复局数编号。"
+      );
+      return true;
+    }
+
+    const selectedMatch = session.selectedMatch;
+    const gameNumber = choice;
+    const publicGameLabel = getPublicGameLabel(gameNumber);
+    const state = getGameSubmissionState(selectedMatch.id, gameNumber);
+
+    if (!isResend && state?.status === "submitted") {
+      await replyToEvent(
+        event,
+        `${publicGameLabel} has already been submitted.\n${publicGameLabel} 已经提交过了。\n\nUse !resend if it failed before, or contact an admin if it was submitted incorrectly.`
+      );
+      delete bucket[authorId];
+      return true;
+    }
+
+    bucket[authorId] = makeSession("await_screenshot", {
+      ...session,
+      selectedMatch,
+      gameNumber,
+      publicGameLabel,
+    });
+
+    await replyToEvent(
+      event,
+      `Please send the scoreboard screenshot for ${publicGameLabel}.\n请发送 ${publicGameLabel} 的战绩截图。\n\nYou can send a direct image URL.`
+    );
+    return true;
+  }
+
+  if (session.step === "await_screenshot") {
+    const screenshotUrl = extractImageUrlFromText(content) || extractImageUrlFromEvent(event);
+
+    if (!screenshotUrl) {
+      await replyToEvent(
+        event,
+        "I couldn't find a screenshot URL. Please send a direct image URL.\n我没有找到截图链接，请发送可直接访问的图片链接。"
+      );
+      return true;
+    }
+
+    bucket[authorId] = makeSession("await_note", {
+      ...session,
+      screenshotUrl,
+    });
+
+    await replyToEvent(
+      event,
+      `Add a short note or type skip.\n请输入简短备注，或输入 skip 跳过。`
+    );
+    return true;
+  }
+
+  if (session.step === "await_note") {
+    const note = content.toLowerCase() === "skip" ? "No note" : content;
+    const publicGameLabel = session.publicGameLabel;
+    const reporterName = getUserDisplayName(authorId);
+
+    const report = {
+      id: nextReportId++,
+      matchId: session.selectedMatch.id,
+      gameNumber: session.gameNumber,
+      publicGameLabel,
+      screenshotUrl: session.screenshotUrl,
+      note,
+      reporterId: authorId,
+      reporterName,
+      status: isResend ? "resending" : "processing",
+      createdAt: new Date().toISOString(),
+    };
+
+    reports.push(report);
+    delete bucket[authorId];
+
+    await replyToEvent(
+      event,
+      `📸 Screenshot received for ${publicGameLabel}. Processing OCR...\n已收到 ${publicGameLabel} 的截图，正在处理 OCR。`
+    );
+
+    try {
+      const ocrResult = await callOcr(
+        session.selectedMatch.id,
+        session.gameNumber,
+        session.screenshotUrl
+      );
+
+      markGameSubmitted(session.selectedMatch.id, session.gameNumber, {
+        publicGameLabel,
+        ocrResult,
+      });
+
+      report.status = "submitted";
+      report.ocrResult = ocrResult;
+
+      const matchedPlayers = ocrResult?.matchedPlayers;
+      const skippedPlayers = ocrResult?.skippedPlayers;
+
+      let extraLine = "";
+      if (
+        typeof matchedPlayers === "number" ||
+        typeof skippedPlayers === "number"
+      ) {
+        extraLine = `\nMatched: ${matchedPlayers ?? "?"} | Skipped: ${skippedPlayers ?? "?"}`;
+      }
+
+      await replyToEvent(
+        event,
+        `✅ ${publicGameLabel} processed successfully.${extraLine}`
+      );
+    } catch (err) {
+      console.error("OCR error:", err.response?.data || err.message);
+
+      markGameFailed(session.selectedMatch.id, session.gameNumber, {
+        publicGameLabel,
+        error: err.response?.data || err.message,
+      });
+
+      report.status = "failed";
+      report.error = err.response?.data || err.message;
+
+      await replyToEvent(
+        event,
+        `❌ ${publicGameLabel} failed to process.\nUse !resend if you want to try again, or contact an admin if it was submitted incorrectly.`
+      );
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+// =============================
+// COMMAND HANDLERS
+// =============================
+async function handleCommand(event, content) {
+  const authorId = String(event.author_id);
+  const admin = getAdmin(authorId);
+  const captain = getCaptain(authorId);
+
+  // First allow active session replies.
+  if (!content.startsWith("!")) {
+    if (await handleCancelSession(event, authorId, content)) return;
+    if (await handleResultLikeSession(event, authorId, content, false)) return;
+    if (await handleResultLikeSession(event, authorId, content, true)) return;
+    if (await handleScheduleSession(event, authorId, content)) return;
+    return;
+  }
+
+  // Channel rules: commands allowed in Captains Chat + ECL HUB + DM only.
+  if (!isAllowedCommandContext(event)) {
+    await replyToEvent(
+      event,
+      "Please use bot commands in Captains Chat, ECL HUB, or DM."
+    );
+    return;
+  }
+
+  const parts = content.trim().split(/\s+/);
+  const command = parts[0].toLowerCase();
+
+  if (command === "!ping") {
+    await replyToEvent(event, "pong");
+    return;
+  }
+
+  if (command === "!commands" || command === "!help") {
+    await replyToEvent(event, formatCommands());
+    return;
+  }
+
+  if (command === "!me" || command === "!whoami") {
+    if (admin) {
+      await replyToEvent(
+        event,
+        `You are an admin (${admin.roleLabel}).\n你是管理员（${admin.roleLabel}）。`
+      );
+      return;
+    }
+
+    if (captain) {
+      await replyToEvent(
+        event,
+        `You are captain of ${captain.teamName} [${captain.tag}].\n你是 ${captain.teamName} [${captain.tag}] 的队长。`
+      );
+      return;
+    }
+
+    await replyToEvent(
+      event,
+      "Captain? No. Minion? Yes.\n你是队长吗？不是。你是小兵。"
+    );
+    return;
+  }
+
+  if (command === "!captains") {
+    await replyToEvent(
+      event,
+      `👑 Current captains / 当前队长:\n\n${formatCaptainsList()}`
+    );
+    return;
+  }
+
+  if (command === "!teams") {
+    await replyToEvent(
+      event,
+      `🛡️ Current teams / 当前队伍:\n\n${formatTeamsList()}`
+    );
+    return;
+  }
+
+  if (command === "!status") {
+    const checks = [];
+
+    checks.push("🤖 Bot: online");
+
+    try {
+      await websiteGet("/api/leaderboard");
+      checks.push("🌐 Website API: online");
+    } catch {
+      checks.push("🌐 Website API: offline");
+    }
+
+    try {
+      await axios.get(`${OCR_BASE_URL}/`, { timeout: 15000 });
+      checks.push("🧠 OCR: online");
+    } catch {
+      checks.push("🧠 OCR: offline");
+    }
+
+    await replyToEvent(event, checks.join("\n"));
+    return;
+  }
+
+  if (command === "!schedule") {
+    await startScheduleFlow(event, authorId);
+    return;
+  }
+
+  if (command === "!accept") {
+    if (!captain && !isAdmin(authorId)) {
+      await replyToEvent(
+        event,
+        "Only captains or admins can accept proposals.\n只有队长或管理员可以接受比赛申请。"
+      );
+      return;
+    }
+
+    const proposalId = Number(parts[1]);
+    if (!proposalId) {
+      await replyToEvent(event, "Usage: !accept PROPOSAL_ID");
+      return;
+    }
+
+    const proposal = proposals.find((p) => p.id === proposalId);
+
+    if (!proposal) {
+      await replyToEvent(
+        event,
+        `No proposal found with ID ${proposalId}.\n未找到编号为 ${proposalId} 的申请。`
+      );
+      return;
+    }
+
+    if (
+      !isAdmin(authorId) &&
+      proposal.toCaptainId !== authorId
+    ) {
+      await replyToEvent(
+        event,
+        "Only the opposing captain can accept this proposal.\n只有对方队长可以接受这场申请。"
+      );
+      return;
+    }
+
+    if (proposal.status !== "pending") {
+      await replyToEvent(
+        event,
+        `This proposal is already ${proposal.status}.\n该申请当前状态为 ${proposal.status}。`
+      );
+      return;
+    }
+
+    try {
+      const homeTeam = teamsByTag[proposal.fromTag];
+      const awayTeam = teamsByTag[proposal.toTag];
+
+      const match = await createRealMatch({
+        homeTeam,
+        awayTeam,
+        format: proposal.format,
+        scheduledIso: proposal.scheduledIso,
+        notes: `Created from proposal #${proposal.id} via KOOK bot`,
+      });
+
+      proposal.status = "accepted";
+      proposal.matchId = match.id;
+      proposal.acceptedAt = new Date().toISOString();
+
+      await replyToEvent(
+        event,
+        `✅ Proposal accepted / 申请已接受。\n${formatProposal(proposal)}`
+      );
+
+      await sendPrivateMessage(
+        proposal.fromCaptainId,
+        `✅ Your proposal was accepted / 你的申请已被接受。\n${formatProposal(proposal)}`
+      );
+
+      await announceMatchScheduled(match);
+    } catch (err) {
+      console.error("Accept proposal create match error:", err.response?.data || err.message);
+      await replyToEvent(
+        event,
+        "❌ Failed to create the real match in the website system."
+      );
+    }
+
+    return;
+  }
+
+  if (command === "!reject") {
+    if (!captain && !isAdmin(authorId)) {
+      await replyToEvent(
+        event,
+        "Only captains or admins can reject proposals.\n只有队长或管理员可以拒绝比赛申请。"
+      );
+      return;
+    }
+
+    const proposalId = Number(parts[1]);
+    if (!proposalId) {
+      await replyToEvent(event, "Usage: !reject PROPOSAL_ID");
+      return;
+    }
+
+    const proposal = proposals.find((p) => p.id === proposalId);
+
+    if (!proposal) {
+      await replyToEvent(
+        event,
+        `No proposal found with ID ${proposalId}.\n未找到编号为 ${proposalId} 的申请。`
+      );
+      return;
+    }
+
+    if (
+      !isAdmin(authorId) &&
+      proposal.toCaptainId !== authorId
+    ) {
+      await replyToEvent(
+        event,
+        "Only the opposing captain can reject this proposal.\n只有对方队长可以拒绝这场申请。"
+      );
+      return;
+    }
+
+    if (proposal.status !== "pending") {
+      await replyToEvent(
+        event,
+        `This proposal is already ${proposal.status}.\n该申请当前状态为 ${proposal.status}。`
+      );
+      return;
+    }
+
+    proposal.status = "rejected";
+    proposal.rejectedAt = new Date().toISOString();
+
+    await replyToEvent(
+      event,
+      `❌ Proposal rejected / 申请已拒绝。\n${formatProposal(proposal)}`
+    );
+
+    await sendPrivateMessage(
+      proposal.fromCaptainId,
+      `❌ Your proposal was rejected / 你的申请被拒绝了。\n${formatProposal(proposal)}`
+    );
+
+    return;
+  }
+
+  if (command === "!cancel" || command === "!unschedule") {
+    await startCancelFlow(event, authorId);
+    return;
+  }
+
+  if (command === "!result" || command === "!report") {
+    await startResultFlow(event, authorId, false);
+    return;
+  }
+
+  if (command === "!resend") {
+    await startResultFlow(event, authorId, true);
+    return;
+  }
+
+  if (command === "!matches") {
+    try {
+      const scheduledMatches = await fetchScheduledMatches();
+
+      if (scheduledMatches.length === 0) {
+        await replyToEvent(
+          event,
+          "No scheduled matches yet.\n目前还没有已安排的比赛。"
+        );
+        return;
+      }
+
+      const message = scheduledMatches
+        .map((match, index) => `${index + 1}. ${formatLiveMatch(match)}`)
+        .join("\n");
+
+      await replyToEvent(
+        event,
+        `📅 Scheduled Matches / 已安排比赛:\n\n${message}`
+      );
+    } catch (err) {
+      console.error("!matches error:", err.response?.data || err.message);
+      await replyToEvent(event, "❌ Failed to load matches.");
+    }
+    return;
+  }
+
+  if (command === "!mygames") {
+    if (!admin && !captain) {
+      await replyToEvent(
+        event,
+        "Only admins or captains can use !mygames.\n只有管理员或队长可以使用 !mygames。"
+      );
+      return;
+    }
+
+    try {
+      const scheduledMatches = await fetchScheduledMatches();
+      const accessibleMatches = admin
+        ? scheduledMatches
+        : getMatchesForCaptain(scheduledMatches, captain);
+
+      if (accessibleMatches.length === 0) {
+        await replyToEvent(
+          event,
+          "You have no scheduled matches.\n你目前没有已安排的比赛。"
+        );
+        return;
+      }
+
+      const message = accessibleMatches
+        .map((match, index) => `${index + 1}. ${formatLiveMatch(match)}`)
+        .join("\n");
+
+      await replyToEvent(
+        event,
+        `📅 Your Matches / 你的比赛:\n\n${message}`
+      );
+    } catch (err) {
+      console.error("!mygames error:", err.response?.data || err.message);
+      await replyToEvent(event, "❌ Failed to load your matches.");
+    }
+    return;
+  }
+
+  if (command === "!leaderboard") {
+    try {
+      const leaderboard = await fetchLeaderboard();
+
+      if (leaderboard.length === 0) {
+        await replyToEvent(event, "No leaderboard data yet.");
+        return;
+      }
+
+      const message = leaderboard
+        .slice(0, 10)
+        .map(formatPublicLeaderboardRow)
+        .join("\n");
+
+      await replyToEvent(
+        event,
+        `🏆 Leaderboard (Top 10)\n\n${message}`
+      );
+    } catch (err) {
+      console.error("!leaderboard error:", err.response?.data || err.message);
+      await replyToEvent(event, "❌ Failed to load leaderboard.");
+    }
+    return;
+  }
+
+  if (command === "!standings") {
+    try {
+      const standings = await fetchStandings();
+
+      if (standings.length === 0) {
+        await replyToEvent(event, "No standings data yet.");
+        return;
+      }
+
+      const message = standings
+        .map(formatPublicStandingsRow)
+        .join("\n");
+
+      await replyToEvent(
+        event,
+        `📊 Standings\n\n${message}`
+      );
+    } catch (err) {
+      console.error("!standings error:", err.response?.data || err.message);
+      await replyToEvent(event, "❌ Failed to load standings.");
+    }
+    return;
+  }
+
+  if (command === "!proposals") {
+    if (!isAdminOrCaptain(authorId)) {
+      await replyToEvent(
+        event,
+        "Only admins or captains can view proposals.\n只有管理员或队长可以查看申请。"
+      );
+      return;
+    }
+
+    if (proposals.length === 0) {
+      await replyToEvent(event, "No proposals yet.\n目前没有比赛申请。");
+      return;
+    }
+
+    const message = proposals.map(formatProposal).join("\n\n");
+    await replyToEvent(
+      event,
+      `📨 Current Proposals / 当前申请:\n\n${message}`
+    );
+    return;
+  }
+
+  await replyToEvent(
+    event,
+    "Unknown command. Use !commands to see what I can do.\n未知指令，请使用 !commands 查看可用功能。"
+  );
+}
+
+// =============================
+// KOOK SOCKET
+// =============================
+let ws = null;
+let heartbeat = null;
+let reconnectTimer = null;
+let reconnecting = false;
+
+function clearHeartbeat() {
+  if (heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = null;
+  }
+}
+
+function scheduleReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+  }
+
+  reconnectTimer = setTimeout(() => {
+    reconnecting = false;
+    startBot().catch((err) => {
+      console.error("Reconnect startBot error:", err.message);
+      scheduleReconnect();
+    });
+  }, RECONNECT_DELAY_MS);
+}
+
 async function startBot() {
+  cleanupExpiredSessions();
+
   const gatewayUrl = await getGateway();
   console.log("Connecting to:", gatewayUrl);
 
-  const ws = new WebSocket(gatewayUrl);
-
-  let heartbeat = null;
+  ws = new WebSocket(gatewayUrl);
   let lastSn = 0;
 
   ws.on("open", () => {
@@ -345,27 +1910,28 @@ async function startBot() {
   });
 
   ws.on("message", async (raw) => {
-    console.log("🔥 RAW MESSAGE RECEIVED");
-
     const packet = parsePacket(raw);
     if (!packet) return;
-
-    console.log("📦 Packet s =", packet.s, "sn =", packet.sn ?? "none");
 
     if (typeof packet.sn === "number") {
       lastSn = packet.sn;
     }
 
     if (packet.s === 1) {
-      console.log("🤝 HELLO:", packet.d);
+      console.log("🤝 HELLO");
 
-      if (!heartbeat) {
-        heartbeat = setInterval(() => {
-          ws.send(JSON.stringify({ s: 2, sn: lastSn }));
-          console.log("💓 Ping sent with sn =", lastSn);
-        }, 30000);
-        console.log("💓 Heartbeat started");
-      }
+      clearHeartbeat();
+      heartbeat = setInterval(() => {
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ s: 2, sn: lastSn }));
+            console.log("💓 Ping sent with sn =", lastSn);
+          }
+        } catch (err) {
+          console.error("Heartbeat send error:", err.message);
+        }
+      }, 30000);
+
       return;
     }
 
@@ -377,760 +1943,27 @@ async function startBot() {
     if (packet.s === 0 && packet.d) {
       const event = packet.d;
 
-      console.log("📨 FULL EVENT:", JSON.stringify(event, null, 2));
-
-      if (event.type === 255) {
-        console.log("📢 System event detected");
-
-        if (event.extra) {
-          console.log(
-            "📢 System event extra:",
-            JSON.stringify(event.extra, null, 2)
-          );
+      try {
+        if (event.type === 255) {
+          if (event.extra && event.extra.type === "joined_guild") {
+            console.log("👤 New user joined the server");
+            await sendWelcomeMessage();
+            return;
+          }
         }
 
-        if (event.extra && event.extra.type === "joined_guild") {
-          console.log("👤 New user joined the server");
-          await sendWelcomeMessage();
-          return;
-        }
+        const content = extractTextContent(event);
+        await handleCommand(event, content);
+      } catch (err) {
+        console.error("Event handling error:", err.stack || err.message);
       }
-
-      const rawContent =
-        event?.extra?.kmarkdown?.raw_content ??
-        event?.content ??
-        "";
-
-      const content = String(rawContent).trim();
-      console.log("📩 Parsed content:", content);
-
-      if (!content) return;
-
-      const authorId = String(event.author_id);
-      const admin = getAdmin(authorId);
-      const captain = getCaptain(authorId);
-
-      // =============================
-      // CANCEL FLOW: choose match by number
-      // =============================
-      if (
-        (admin || captain) &&
-        cancelSessions[authorId] &&
-        cancelSessions[authorId].step === "choose_match" &&
-        !content.startsWith("!")
-      ) {
-        const session = cancelSessions[authorId];
-        const choice = Number(content);
-
-        if (
-          !Number.isInteger(choice) ||
-          choice < 1 ||
-          choice > session.matches.length
-        ) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid choice. Reply with the match number from the list.\n无效选择，请回复列表中的比赛编号。"
-          );
-          return;
-        }
-
-        const selectedMatch = session.matches[choice - 1];
-        selectedMatch.status = "cancelled";
-        delete cancelSessions[authorId];
-
-        await sendChannelMessage(
-          SCHEDULE_CHANNEL_ID,
-          `🛑 Match Cancelled! / 比赛已取消！\n${formatMatch(selectedMatch)}`
-        );
-
-        return;
-      }
-
-      // =============================
-      // REPORT FLOW STEP 1: choose match
-      // =============================
-      if (
-        (admin || captain) &&
-        reportSessions[authorId] &&
-        reportSessions[authorId].step === "choose_match" &&
-        !content.startsWith("!")
-      ) {
-        const session = reportSessions[authorId];
-        const choice = Number(content);
-
-        if (
-          !Number.isInteger(choice) ||
-          choice < 1 ||
-          choice > session.matches.length
-        ) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid choice. Reply with the match number from the list.\n无效选择，请回复列表中的比赛编号。"
-          );
-          return;
-        }
-
-        const selectedMatch = session.matches[choice - 1];
-        const gameCount = getGameCountFromFormat(selectedMatch.format);
-
-        reportSessions[authorId] = {
-          step: "choose_game",
-          selectedMatch,
-          gameCount,
-        };
-
-        let gameOptions = "";
-        for (let i = 1; i <= gameCount; i++) {
-          gameOptions += `${i}. Game ${i}\n`;
-        }
-
-        await sendChannelMessage(
-          event.target_id,
-          `Which game are you reporting?\n你要上报哪一局？\n\n${gameOptions}\nReply with a number / 回复对应数字。`
-        );
-        return;
-      }
-
-      // =============================
-      // REPORT FLOW STEP 2: choose game
-      // =============================
-      if (
-        (admin || captain) &&
-        reportSessions[authorId] &&
-        reportSessions[authorId].step === "choose_game" &&
-        !content.startsWith("!")
-      ) {
-        const session = reportSessions[authorId];
-        const choice = Number(content);
-
-        if (
-          !Number.isInteger(choice) ||
-          choice < 1 ||
-          choice > session.gameCount
-        ) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid choice. Reply with the game number.\n无效选择，请回复局数编号。"
-          );
-          return;
-        }
-
-        reportSessions[authorId] = {
-          ...session,
-          step: "await_screenshot",
-          gameNumber: choice,
-        };
-
-        await sendChannelMessage(
-          event.target_id,
-          `Send the screenshot link for Game ${choice}.\n请发送第 ${choice} 局的截图链接。`
-        );
-        return;
-      }
-
-      // =============================
-      // REPORT FLOW STEP 3: screenshot
-      // =============================
-      if (
-        (admin || captain) &&
-        reportSessions[authorId] &&
-        reportSessions[authorId].step === "await_screenshot" &&
-        !content.startsWith("!")
-      ) {
-        const session = reportSessions[authorId];
-
-        reportSessions[authorId] = {
-          ...session,
-          step: "await_note",
-          screenshotUrl: content,
-        };
-
-        await sendChannelMessage(
-          event.target_id,
-          `Add a short note or type skip.\n请输入简短备注，或输入 skip 跳过。`
-        );
-        return;
-      }
-
-      // =============================
-      // REPORT FLOW STEP 4: note
-      // =============================
-      if (
-        (admin || captain) &&
-        reportSessions[authorId] &&
-        reportSessions[authorId].step === "await_note" &&
-        !content.startsWith("!")
-      ) {
-        const session = reportSessions[authorId];
-        const note = content.toLowerCase() === "skip" ? "No note" : content;
-
-        const reporterName = admin
-          ? `${admin.nickname} (${admin.roleLabel})`
-          : `${captain.nickname} — ${captain.teamName} [${captain.tag}]`;
-
-        const report = {
-          id: nextReportId++,
-          matchId: session.selectedMatch.id,
-          gameNumber: session.gameNumber,
-          screenshotUrl: session.screenshotUrl,
-          note,
-          reporterId: authorId,
-          reporterName,
-          status: "pending",
-          createdAt: new Date().toISOString(),
-        };
-
-        reports.push(report);
-        delete reportSessions[authorId];
-
-        await sendChannelMessage(
-          event.target_id,
-          `📸 Report submitted / 赛果已提交。\n${formatReport(report)}`
-        );
-        return;
-      }
-
-      // =============================
-      // SCHEDULE FLOW STEP 1: TEAM CHOICE
-      // =============================
-      if (
-        captain &&
-        scheduleSessions[authorId] &&
-        scheduleSessions[authorId].step === "choose_opponent" &&
-        !content.startsWith("!")
-      ) {
-        const session = scheduleSessions[authorId];
-        const choice = Number(content);
-
-        if (
-          !Number.isInteger(choice) ||
-          choice < 1 ||
-          choice > session.opponents.length
-        ) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid choice. Reply with the team number from the list.\n无效选择，请回复列表中的队伍编号。"
-          );
-          return;
-        }
-
-        const selectedOpponent = session.opponents[choice - 1];
-
-        scheduleSessions[authorId] = {
-          ...session,
-          step: "choose_datetime",
-          selectedOpponent,
-        };
-
-        await sendChannelMessage(
-          event.target_id,
-          `You chose ${selectedOpponent.teamName} [${selectedOpponent.tag}].\n你选择了 ${selectedOpponent.teamName} [${selectedOpponent.tag}]。\n\nNow send the proposed date/time like this:\n请按以下格式发送比赛时间：\nYYYY-MM-DD HH:MM\nExample / 例如: 2026-04-12 20:00`
-        );
-        return;
-      }
-
-      // =============================
-      // SCHEDULE FLOW STEP 2: DATETIME
-      // =============================
-      if (
-        captain &&
-        scheduleSessions[authorId] &&
-        scheduleSessions[authorId].step === "choose_datetime" &&
-        !content.startsWith("!")
-      ) {
-        const session = scheduleSessions[authorId];
-
-        if (!isValidDateTime(content)) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid date/time format.\n格式错误。\nPlease use / 请使用: YYYY-MM-DD HH:MM\nExample / 例如: 2026-04-12 20:00"
-          );
-          return;
-        }
-
-        scheduleSessions[authorId] = {
-          ...session,
-          step: "choose_format",
-          dateTime: content,
-        };
-
-        await sendChannelMessage(
-          event.target_id,
-          `Choose the match format / 请选择比赛赛制:\n\n1. BO1\n2. BO2\n3. BO3\n4. BO5\n\nReply with a number / 回复对应数字。`
-        );
-        return;
-      }
-
-      // =============================
-      // SCHEDULE FLOW STEP 3: FORMAT
-      // =============================
-      if (
-        captain &&
-        scheduleSessions[authorId] &&
-        scheduleSessions[authorId].step === "choose_format" &&
-        !content.startsWith("!")
-      ) {
-        const session = scheduleSessions[authorId];
-        const choice = Number(content);
-        const formats = getFormatOptions();
-
-        if (
-          !Number.isInteger(choice) ||
-          choice < 1 ||
-          choice > formats.length
-        ) {
-          await sendChannelMessage(
-            event.target_id,
-            "Invalid choice. Reply with 1, 2, 3, or 4.\n无效选择，请回复 1、2、3 或 4。"
-          );
-          return;
-        }
-
-        const selectedFormat = formats[choice - 1];
-
-        const proposal = {
-          id: nextProposalId++,
-          fromCaptainId: authorId,
-          fromTeam: captain.teamName,
-          fromTag: captain.tag,
-          toCaptainId: session.selectedOpponent.userId,
-          toTeam: session.selectedOpponent.teamName,
-          toTag: session.selectedOpponent.tag,
-          dateTime: session.dateTime,
-          format: selectedFormat,
-          status: "pending",
-          createdAt: new Date().toISOString(),
-        };
-
-        proposals.push(proposal);
-        delete scheduleSessions[authorId];
-
-        await sendChannelMessage(
-          event.target_id,
-          `✅ Proposal sent / 对局申请已发送。\n${formatProposal(proposal)}`
-        );
-
-        const dmWorked = await sendPrivateMessage(
-          proposal.toCaptainId,
-          `📩 Match proposal received / 收到比赛申请
-
-${proposal.fromTeam} [${proposal.fromTag}] wants to play your team ${proposal.toTeam} [${proposal.toTag}].
-${proposal.fromTeam} [${proposal.fromTag}] 想和你的队伍 ${proposal.toTeam} [${proposal.toTag}] 进行比赛。
-
-Proposed time / 提议时间:
-${proposal.dateTime}
-
-Format / 赛制:
-${proposal.format}
-
-Reply with / 回复以下指令:
-!accept ${proposal.id}
-or
-!reject ${proposal.id}
-
-If accepted, the match can be cancelled later if needed.
-如果接受，之后如有需要可以取消比赛。`
-        );
-
-        if (!dmWorked) {
-          await sendChannelMessage(
-            SCHEDULE_CHANNEL_ID,
-            `📩 Captain approval needed / 需要队长确认\n${formatProposal(proposal)}\n\nOpposing captain can reply with / 对方队长可回复：\n!accept ${proposal.id}\n!reject ${proposal.id}`
-          );
-        }
-
-        return;
-      }
-
-      if (!content.startsWith("!")) return;
-
-      const parts = content.split(" ");
-      const command = parts[0].toLowerCase();
-
-      if (command === "!ping") {
-        await sendChannelMessage(event.target_id, "pong");
-        return;
-      }
-
-      if (command === "!commands" || command === "!help") {
-        await sendChannelMessage(event.target_id, formatCommands());
-        return;
-      }
-
-      if (command === "!whoami") {
-        if (admin) {
-          await sendChannelMessage(
-            event.target_id,
-            `You are an admin (${admin.roleLabel}).\n你是管理员（${admin.roleLabel}）。`
-          );
-        } else if (captain) {
-          await sendChannelMessage(
-            event.target_id,
-            `You are captain of ${captain.teamName} [${captain.tag}].\n你是 ${captain.teamName} [${captain.tag}] 的队长。`
-          );
-        } else {
-          await sendChannelMessage(
-            event.target_id,
-            "Captain? No. Minion? Yes.\n你是队长吗？不是。你是小兵。"
-          );
-        }
-        return;
-      }
-
-      if (command === "!captains") {
-        const captainList = Object.values(captains)
-          .map((c) => `• ${c.nickname} — ${c.teamName} [${c.tag}]`)
-          .join("\n");
-
-        await sendChannelMessage(
-          event.target_id,
-          `👑 Current captains / 当前队长:\n\n${captainList}`
-        );
-        return;
-      }
-
-      if (command === "!teams") {
-        const teamList = Object.values(captains)
-          .map((c) => `• ${c.teamName} [${c.tag}]`)
-          .join("\n");
-
-        await sendChannelMessage(
-          event.target_id,
-          `🛡️ Current teams / 当前队伍:\n\n${teamList}`
-        );
-        return;
-      }
-
-      if (command === "!schedule") {
-        if (!captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only captains can schedule matches.\n只有队长可以安排比赛。"
-          );
-          return;
-        }
-
-        const opponents = getAvailableOpponents(authorId);
-
-        if (opponents.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "No opponent teams are set up yet.\n目前还没有可选的对手队伍。"
-          );
-          return;
-        }
-
-        scheduleSessions[authorId] = {
-          step: "choose_opponent",
-          opponents,
-        };
-
-        const teamList = opponents
-          .map((team, index) => `${index + 1}. ${team.teamName} [${team.tag}]`)
-          .join("\n");
-
-        await sendChannelMessage(
-          event.target_id,
-          `Okay, here is the list of teams.\n请选择你想对阵的队伍：\n\n${teamList}\n\nReply with a number / 回复对应数字。`
-        );
-        return;
-      }
-
-      if (command === "!accept") {
-        if (!captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only captains can accept proposals.\n只有队长可以接受比赛申请。"
-          );
-          return;
-        }
-
-        const proposalId = Number(parts[1]);
-        if (!proposalId) {
-          await sendChannelMessage(
-            event.target_id,
-            "Usage / 用法: !accept PROPOSAL_ID"
-          );
-          return;
-        }
-
-        const proposal = proposals.find((p) => p.id === proposalId);
-
-        if (!proposal) {
-          await sendChannelMessage(
-            event.target_id,
-            `No proposal found with ID ${proposalId}.\n未找到编号为 ${proposalId} 的申请。`
-          );
-          return;
-        }
-
-        if (proposal.toCaptainId !== authorId) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only the opposing captain can accept this proposal.\n只有对方队长可以接受这场申请。"
-          );
-          return;
-        }
-
-        if (proposal.status !== "pending") {
-          await sendChannelMessage(
-            event.target_id,
-            `This proposal is already ${proposal.status}.\n该申请当前状态为 ${proposal.status}。`
-          );
-          return;
-        }
-
-        proposal.status = "accepted";
-
-        const match = {
-          id: nextMatchId++,
-          proposalId: proposal.id,
-          teamA: proposal.fromTeam,
-          tagA: proposal.fromTag,
-          teamB: proposal.toTeam,
-          tagB: proposal.toTag,
-          dateTime: proposal.dateTime,
-          format: proposal.format,
-          status: "scheduled",
-          createdAt: new Date().toISOString(),
-        };
-
-        confirmedMatches.push(match);
-
-        await sendChannelMessage(
-          event.target_id,
-          `✅ Proposal accepted / 申请已接受。\n${formatProposal(proposal)}`
-        );
-
-        await sendPrivateMessage(
-          proposal.fromCaptainId,
-          `✅ Your proposal was accepted / 你的申请已被接受。\n${formatProposal(proposal)}`
-        );
-
-        await sendChannelMessage(
-          SCHEDULE_CHANNEL_ID,
-          `📅 Match Scheduled! / 比赛已安排！\n${formatMatch(match)}`
-        );
-        return;
-      }
-
-      if (command === "!reject") {
-        if (!captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only captains can reject proposals.\n只有队长可以拒绝比赛申请。"
-          );
-          return;
-        }
-
-        const proposalId = Number(parts[1]);
-        if (!proposalId) {
-          await sendChannelMessage(
-            event.target_id,
-            "Usage / 用法: !reject PROPOSAL_ID"
-          );
-          return;
-        }
-
-        const proposal = proposals.find((p) => p.id === proposalId);
-
-        if (!proposal) {
-          await sendChannelMessage(
-            event.target_id,
-            `No proposal found with ID ${proposalId}.\n未找到编号为 ${proposalId} 的申请。`
-          );
-          return;
-        }
-
-        if (proposal.toCaptainId !== authorId) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only the opposing captain can reject this proposal.\n只有对方队长可以拒绝这场申请。"
-          );
-          return;
-        }
-
-        if (proposal.status !== "pending") {
-          await sendChannelMessage(
-            event.target_id,
-            `This proposal is already ${proposal.status}.\n该申请当前状态为 ${proposal.status}。`
-          );
-          return;
-        }
-
-        proposal.status = "rejected";
-
-        await sendChannelMessage(
-          event.target_id,
-          `❌ Proposal rejected / 申请已拒绝。\n${formatProposal(proposal)}`
-        );
-
-        await sendPrivateMessage(
-          proposal.fromCaptainId,
-          `❌ Your proposal was rejected / 你的申请被拒绝了。\n${formatProposal(proposal)}`
-        );
-        return;
-      }
-
-      if (command === "!cancel") {
-        if (!admin && !captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only admins or captains can cancel matches.\n只有管理员或队长可以取消比赛。"
-          );
-          return;
-        }
-
-        const accessibleMatches = getAccessibleMatchesForCancel(authorId);
-
-        if (accessibleMatches.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "You have no scheduled matches to cancel.\n你目前没有可取消的已安排比赛。"
-          );
-          return;
-        }
-
-        cancelSessions[authorId] = {
-          step: "choose_match",
-          matches: accessibleMatches,
-        };
-
-        const matchList = accessibleMatches
-          .map((match, index) => {
-            return `${index + 1}. ${match.teamA} vs ${match.teamB} — ${match.dateTime} — ${match.format}`;
-          })
-          .join("\n");
-
-        await sendChannelMessage(
-          event.target_id,
-          `Which match do you want to cancel?\n你想取消哪一场比赛？\n\n${matchList}\n\nReply with a number / 回复对应数字。`
-        );
-        return;
-      }
-
-      if (command === "!report") {
-        if (!admin && !captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only admins or captains can submit reports.\n只有管理员或队长可以提交赛果。"
-          );
-          return;
-        }
-
-        const accessibleMatches = getAccessibleMatchesForReport(authorId);
-
-        if (accessibleMatches.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "You have no scheduled matches to report.\n你目前没有可上报的比赛。"
-          );
-          return;
-        }
-
-        reportSessions[authorId] = {
-          step: "choose_match",
-          matches: accessibleMatches,
-        };
-
-        const matchList = accessibleMatches
-          .map((match, index) => {
-            return `${index + 1}. ${match.teamA} vs ${match.teamB} — ${match.dateTime} — ${match.format}`;
-          })
-          .join("\n");
-
-        await sendChannelMessage(
-          event.target_id,
-          `Which match are you reporting?\n你要上报哪一场比赛？\n\n${matchList}\n\nReply with a number / 回复对应数字。`
-        );
-        return;
-      }
-
-      if (command === "!proposals") {
-        if (!admin && !captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only admins or captains can view proposals.\n只有管理员或队长可以查看申请。"
-          );
-          return;
-        }
-
-        if (proposals.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "No proposals yet.\n目前没有比赛申请。"
-          );
-          return;
-        }
-
-        const message = proposals.map(formatProposal).join("\n\n");
-        await sendChannelMessage(
-          event.target_id,
-          `📨 Current proposals / 当前申请:\n\n${message}`
-        );
-        return;
-      }
-
-      if (command === "!matches") {
-        if (!admin && !captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only admins or captains can view matches.\n只有管理员或队长可以查看比赛。"
-          );
-          return;
-        }
-
-        if (confirmedMatches.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "No confirmed matches yet.\n目前还没有已确认的比赛。"
-          );
-          return;
-        }
-
-        const message = confirmedMatches.map(formatMatch).join("\n\n");
-        await sendChannelMessage(
-          event.target_id,
-          `📅 Confirmed matches / 已确认比赛:\n\n${message}`
-        );
-        return;
-      }
-
-      if (command === "!reports") {
-        if (!admin && !captain) {
-          await sendChannelMessage(
-            event.target_id,
-            "Only admins or captains can view reports.\n只有管理员或队长可以查看赛果。"
-          );
-          return;
-        }
-
-        if (reports.length === 0) {
-          await sendChannelMessage(
-            event.target_id,
-            "No reports yet.\n目前没有赛果记录。"
-          );
-          return;
-        }
-
-        const message = reports.map(formatReport).join("\n\n");
-        await sendChannelMessage(
-          event.target_id,
-          `📸 Current reports / 当前赛果:\n\n${message}`
-        );
-        return;
-      }
-
-      await sendChannelMessage(
-        event.target_id,
-        "Unknown command. Use !commands to see what I can do.\n未知指令，请使用 !commands 查看可用功能。"
-      );
     }
   });
 
   ws.on("close", () => {
     console.log("❌ WebSocket closed");
-    if (heartbeat) clearInterval(heartbeat);
+    clearHeartbeat();
+    scheduleReconnect();
   });
 
   ws.on("error", (err) => {
@@ -1138,4 +1971,9 @@ If accepted, the match can be cancelled later if needed.
   });
 }
 
-startBot();
+setInterval(cleanupExpiredSessions, 60 * 1000);
+
+startBot().catch((err) => {
+  console.error("Initial startBot error:", err.message);
+  scheduleReconnect();
+});
