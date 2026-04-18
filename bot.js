@@ -419,6 +419,42 @@ function extractImageUrlFromText(text) {
   return match ? match[0] : null;
 }
 
+function findImageUrlInCardData(node) {
+  if (!node) return null;
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findImageUrlInCardData(item);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  if (typeof node === "object") {
+    if (typeof node.src === "string" && node.src.startsWith("http")) {
+      return node.src;
+    }
+
+    if (typeof node.url === "string" && node.url.startsWith("http")) {
+      return node.url;
+    }
+
+    if (
+      typeof node.download_url === "string" &&
+      node.download_url.startsWith("http")
+    ) {
+      return node.download_url;
+    }
+
+    for (const value of Object.values(node)) {
+      const found = findImageUrlInCardData(value);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 function extractImageUrlFromEvent(event) {
   const text = extractTextContent(event);
   const urlFromText = extractImageUrlFromText(text);
@@ -491,8 +527,18 @@ function extractImageUrlFromEvent(event) {
     }
   }
 
-  if (typeof event?.content === "string" && event.content.startsWith("http")) {
-    return event.content;
+  if (typeof event?.content === "string") {
+    if (event.content.startsWith("http")) {
+      return event.content;
+    }
+
+    try {
+      const parsed = JSON.parse(event.content);
+      const cardImageUrl = findImageUrlInCardData(parsed);
+      if (cardImageUrl) return cardImageUrl;
+    } catch {
+      // not JSON card content
+    }
   }
 
   return null;
