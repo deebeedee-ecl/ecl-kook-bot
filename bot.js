@@ -162,10 +162,10 @@ function isAdminOrCaptain(userId) {
 
 function makeSession(step, extra = {}) {
   return {
-    step,
-    createdAt: nowMs(),
-    updatedAt: nowMs(),
     ...extra,
+    step,
+    createdAt: extra.createdAt ?? nowMs(),
+    updatedAt: nowMs(),
   };
 }
 
@@ -190,6 +190,13 @@ function cleanupExpiredSessions() {
       }
     }
   }
+}
+
+function clearUserSessions(userId) {
+  delete scheduleSessions[userId];
+  delete cancelSessions[userId];
+  delete resultSessions[userId];
+  delete resendSessions[userId];
 }
 
 function isDirectMessageEvent(event) {
@@ -353,7 +360,6 @@ Scheduling / 赛程:
 • !unschedule
 
 Results / 赛果:
-• !result
 • !report
 • !resend
 
@@ -763,6 +769,8 @@ async function startScheduleFlow(event, authorId) {
     return;
   }
 
+  clearUserSessions(authorId);
+
   if (admin) {
     const teamOptions = getAllTeamsSorted();
 
@@ -829,6 +837,7 @@ async function handleScheduleSession(event, authorId, content) {
     const opponents = getAvailableOpponentsByTag(homeTeam.tag);
 
     scheduleSessions[authorId] = makeSession("choose_opponent", {
+      ...session,
       isAdminFlow: true,
       homeTeam,
       opponents,
@@ -1118,6 +1127,8 @@ async function startCancelFlow(event, authorId) {
     return;
   }
 
+  clearUserSessions(authorId);
+
   try {
     const scheduledMatches = await fetchScheduledMatches();
     const accessibleMatches = isAdmin(authorId)
@@ -1230,6 +1241,8 @@ async function startResultFlow(event, authorId, isResend = false) {
     return;
   }
 
+  clearUserSessions(authorId);
+
   try {
     const scheduledMatches = await fetchScheduledMatches();
     const accessibleMatches = isAdmin(authorId)
@@ -1281,7 +1294,7 @@ async function handleResultLikeSession(event, authorId, content, isResend = fals
     delete bucket[authorId];
     await replyToEvent(
       event,
-      `Your ${isResend ? "resend" : "result"} session expired. Please start again with ${isResend ? "!resend" : "!result"}.\n你的会话已过期，请重新开始。`
+      `Your ${isResend ? "resend" : "report"} session expired. Please start again with ${isResend ? "!resend" : "!report"}.\n你的会话已过期，请重新开始。`
     );
     return true;
   }
@@ -1712,7 +1725,7 @@ async function handleCommand(event, content) {
     return;
   }
 
-  if (command === "!result" || command === "!report") {
+  if (command === "!report") {
     await startResultFlow(event, authorId, false);
     return;
   }
