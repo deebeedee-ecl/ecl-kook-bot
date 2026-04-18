@@ -270,10 +270,10 @@ function getMonthOptions() {
 
 function getDayOptions(month) {
   if (month === 4) {
-    return Array.from({ length: 11 }, (_, i) => 20 + i); // 20-30
+    return Array.from({ length: 11 }, (_, i) => 20 + i);
   }
   if (month === 5) {
-    return Array.from({ length: 20 }, (_, i) => 1 + i); // 1-20
+    return Array.from({ length: 20 }, (_, i) => 1 + i);
   }
   return [];
 }
@@ -324,7 +324,6 @@ function buildShanghaiIsoFromSelection(month, day, timeStr) {
   const [hourStr, minuteStr] = timeStr.split(":");
   const monthPadded = String(month).padStart(2, "0");
   const dayPadded = String(day).padStart(2, "0");
-
   const source = `2026-${monthPadded}-${dayPadded}T${hourStr}:${minuteStr}:00+08:00`;
   return new Date(source).toISOString();
 }
@@ -416,7 +415,7 @@ function extractTextContent(event) {
 }
 
 function extractImageUrlFromText(text) {
-  const match = text.match(/https?:\/\/\S+/i);
+  const match = String(text || "").match(/https?:\/\/\S+/i);
   return match ? match[0] : null;
 }
 
@@ -425,24 +424,76 @@ function extractImageUrlFromEvent(event) {
   const urlFromText = extractImageUrlFromText(text);
   if (urlFromText) return urlFromText;
 
+  const extra = event?.extra || {};
+
+  if (typeof extra?.url === "string" && extra.url.startsWith("http")) {
+    return extra.url;
+  }
+
+  if (typeof extra?.src === "string" && extra.src.startsWith("http")) {
+    return extra.src;
+  }
+
+  if (typeof extra?.content === "string" && extra.content.startsWith("http")) {
+    return extra.content;
+  }
+
+  if (extra?.attachment) {
+    if (
+      typeof extra.attachment.url === "string" &&
+      extra.attachment.url.startsWith("http")
+    ) {
+      return extra.attachment.url;
+    }
+
+    if (
+      typeof extra.attachment.download_url === "string" &&
+      extra.attachment.download_url.startsWith("http")
+    ) {
+      return extra.attachment.download_url;
+    }
+
+    if (
+      typeof extra.attachment.src === "string" &&
+      extra.attachment.src.startsWith("http")
+    ) {
+      return extra.attachment.src;
+    }
+  }
+
   const attachments =
-    event?.extra?.attachments ||
+    extra?.attachments ||
     event?.attachments ||
     [];
 
-  if (Array.isArray(attachments) && attachments.length > 0) {
-    const first = attachments[0];
-    return (
-      first?.url ||
-      first?.download_url ||
-      first?.src ||
-      null
-    );
+  if (Array.isArray(attachments)) {
+    for (const attachment of attachments) {
+      if (
+        typeof attachment?.url === "string" &&
+        attachment.url.startsWith("http")
+      ) {
+        return attachment.url;
+      }
+
+      if (
+        typeof attachment?.download_url === "string" &&
+        attachment.download_url.startsWith("http")
+      ) {
+        return attachment.download_url;
+      }
+
+      if (
+        typeof attachment?.src === "string" &&
+        attachment.src.startsWith("http")
+      ) {
+        return attachment.src;
+      }
+    }
   }
 
-  const extra = event?.extra || {};
-  if (extra?.attachment?.url) return extra.attachment.url;
-  if (extra?.attachment?.download_url) return extra.attachment.download_url;
+  if (typeof event?.content === "string" && event.content.startsWith("http")) {
+    return event.content;
+  }
 
   return null;
 }
@@ -1362,18 +1413,27 @@ async function handleResultLikeSession(event, authorId, content, isResend = fals
 
     await replyToEvent(
       event,
-      `Please send the scoreboard screenshot for ${publicGameLabel}.\n请发送 ${publicGameLabel} 的战绩截图。\n\nYou can send a direct image URL.`
+      `Please send the scoreboard screenshot for ${publicGameLabel}.\n请发送 ${publicGameLabel} 的战绩截图。\n\nYou can upload the image directly or send a direct image URL.`
     );
     return true;
   }
 
   if (session.step === "await_screenshot") {
-    const screenshotUrl = extractImageUrlFromText(content) || extractImageUrlFromEvent(event);
+    console.log("🖼️ SCREENSHOT EVENT DEBUG:", JSON.stringify({
+      content: event?.content,
+      raw_content: event?.extra?.kmarkdown?.raw_content,
+      type: event?.type,
+      extra: event?.extra,
+      attachments: event?.attachments,
+    }));
+
+    const screenshotUrl =
+      extractImageUrlFromText(content) || extractImageUrlFromEvent(event);
 
     if (!screenshotUrl) {
       await replyToEvent(
         event,
-        "I couldn't find a screenshot URL. Please send a direct image URL.\n我没有找到截图链接，请发送可直接访问的图片链接。"
+        "I couldn't find a screenshot image or URL. Please upload the image directly or send a direct image URL.\n我没有找到截图图片或链接，请直接上传图片或发送可直接访问的图片链接。"
       );
       return true;
     }
