@@ -1027,7 +1027,6 @@ async function handleScheduleSession(event, authorId, content) {
       session.timeStr
     );
 
-    // Admin flow creates match directly.
     if (session.isAdminFlow) {
       try {
         const match = await createRealMatch({
@@ -1057,7 +1056,6 @@ async function handleScheduleSession(event, authorId, content) {
       return true;
     }
 
-    // Captain flow creates proposal, then DM opposing captain.
     const proposal = {
       id: nextProposalId++,
       fromCaptainId: authorId,
@@ -1475,11 +1473,17 @@ async function handleResultLikeSession(event, authorId, content, isResend = fals
 // COMMAND HANDLERS
 // =============================
 async function handleCommand(event, content) {
+  console.log("⚙️ handleCommand called with:", JSON.stringify({
+    authorId: event?.author_id,
+    targetId: event?.target_id,
+    guildId: event?.extra?.guild_id,
+    content,
+  }));
+
   const authorId = String(event.author_id);
   const admin = getAdmin(authorId);
   const captain = getCaptain(authorId);
 
-  // First allow active session replies.
   if (!content.startsWith("!")) {
     if (await handleCancelSession(event, authorId, content)) return;
     if (await handleResultLikeSession(event, authorId, content, false)) return;
@@ -1488,7 +1492,6 @@ async function handleCommand(event, content) {
     return;
   }
 
-  // Channel rules: commands allowed in Captains Chat + ECL HUB + DM only.
   if (!isAllowedCommandContext(event)) {
     await replyToEvent(
       event,
@@ -1603,10 +1606,7 @@ async function handleCommand(event, content) {
       return;
     }
 
-    if (
-      !isAdmin(authorId) &&
-      proposal.toCaptainId !== authorId
-    ) {
+    if (!isAdmin(authorId) && proposal.toCaptainId !== authorId) {
       await replyToEvent(
         event,
         "Only the opposing captain can accept this proposal.\n只有对方队长可以接受这场申请。"
@@ -1685,10 +1685,7 @@ async function handleCommand(event, content) {
       return;
     }
 
-    if (
-      !isAdmin(authorId) &&
-      proposal.toCaptainId !== authorId
-    ) {
+    if (!isAdmin(authorId) && proposal.toCaptainId !== authorId) {
       await replyToEvent(
         event,
         "Only the opposing captain can reject this proposal.\n只有对方队长可以拒绝这场申请。"
@@ -1926,6 +1923,12 @@ async function startBot() {
     const packet = parsePacket(raw);
     if (!packet) return;
 
+    console.log("📦 PACKET:", JSON.stringify({
+      s: packet?.s,
+      sn: packet?.sn,
+      hasD: !!packet?.d,
+    }));
+
     if (typeof packet.sn === "number") {
       lastSn = packet.sn;
     }
@@ -1957,6 +1960,19 @@ async function startBot() {
       const event = packet.d;
 
       try {
+        console.log("📩 EVENT RECEIVED:", JSON.stringify({
+          sn: packet.sn,
+          type: event?.type,
+          channel_type: event?.channel_type,
+          target_id: event?.target_id,
+          author_id: event?.author_id,
+          content: event?.content,
+          raw_content: event?.extra?.kmarkdown?.raw_content,
+          extra_type: event?.extra?.type,
+        }));
+
+        console.log("📩 RAW EVENT:", JSON.stringify(packet.d));
+
         if (event.type === 255) {
           if (event.extra && event.extra.type === "joined_guild") {
             console.log("👤 New user joined the server");
@@ -1966,6 +1982,8 @@ async function startBot() {
         }
 
         const content = extractTextContent(event);
+        console.log("📝 Extracted content:", content);
+
         await handleCommand(event, content);
       } catch (err) {
         console.error("Event handling error:", err.stack || err.message);
