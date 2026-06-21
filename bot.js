@@ -11,6 +11,13 @@ const API_BASE = "https://www.kookapp.cn/api/v3";
 const SITE_URL = process.env.ECL_SITE_URL || "https://eclchina.lol";
 const KOOK_VERIFY_SECRET = process.env.ECL_KOOK_BOT_SECRET;
 const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID || "1969692300297863";
+const RANKED_INHOUSE_CHANNEL_ID = process.env.KOOK_RANKED_INHOUSE_CHANNEL_ID || "8024346698320304";
+const ADMIN_KOOK_IDS = new Set(
+  String(process.env.ADMIN_KOOK_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+);
 const RECONNECT_DELAY_MS = 5000;
 
 if (!TOKEN) {
@@ -28,30 +35,51 @@ function formatCommands() {
     "",
     "- !ping",
     "- !help / !commands",
+    "- !welcome",
+    "- !me",
+    "- !rank",
     "- !elo / !leaderboard",
     "- !verify ECL-XXXXXX / !link ECL-XXXXXX",
+    "- !inhouse",
+    "- !ready",
+    "- !status",
+    "- !report",
+    "- !cancel (admin)",
     "",
     "Use !verify with your dashboard code to link your KOOK account to ECL.",
-    "",
-    "The bot is stripped back for now. Scheduling, reports, teams, standings, and results are offline while we rebuild.",
   ].join("\n");
 }
 
 function formatWelcomeMessage() {
   return [
-    "🎉 Welcome to Expat China League (ECL)",
+    "Welcome to the Expat China League (ECL)",
     "欢迎来到 Expat China League（ECL）",
     "",
-    "ECL is a China-based League of Legends community for expats and local players.",
-    "ECL 是一个面向外籍玩家与本地玩家的中国英雄联盟社区。",
+    "We're a League of Legends community in China, active since 2016 - mixing expats and local players.",
+    "我们是一个在中国活跃的英雄联盟社区，成立于2016年，汇聚来自世界各地的玩家与中国本地玩家。",
     "",
-    "To play ranked inhouses, create your ECL account and verify your KOOK:",
-    "想参加排位内战，请先注册 ECL 账号并完成 KOOK 验证：",
+    "━━━━━━━━━━━━━━━",
     "",
-    getUrl("/signup"),
+    "Start here / 新手指南:",
+    "- Jump into any channel",
+    "- DM an admin if you need help",
+    "- Check the guide if you're new to CN servers",
     "",
-    "After signup, send your Hub code here with:",
-    "注册后，在这里发送你的 Hub 验证码：",
+    "- 可以加入任意频道交流",
+    "- 有问题可以私信管理员",
+    "- 新玩家请查看新手指南",
+    "",
+    "━━━━━━━━━━━━━━━",
+    "",
+    "Want to play? / 想参加比赛？",
+    "",
+    "Find a team, sign up as a free agent, or verify your account for ranked inhouses:",
+    "寻找队伍、以自由人身份报名，或验证账号参加排位内战：",
+    "",
+    SITE_URL,
+    "",
+    "To play ranked inhouses, create/log in to your ECL account, open your Hub/profile, copy your KOOK verification code, then type:",
+    "如果想参加排位内战，请登录 ECL 账号，进入 Hub / 个人资料页面，复制 KOOK 验证码，然后输入：",
     "",
     "!verify ECL-XXXXXX",
   ].join("\n");
@@ -84,6 +112,104 @@ async function sendChannelMessage(targetId, content) {
 
 async function sendWelcomeMessage() {
   await sendChannelMessage(WELCOME_CHANNEL_ID, formatWelcomeMessage());
+}
+
+function siteHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "x-ecl-kook-secret": KOOK_VERIFY_SECRET,
+  };
+}
+
+async function callEclApi(path, body) {
+  if (!KOOK_VERIFY_SECRET) {
+    throw new Error("Missing ECL_KOOK_BOT_SECRET.");
+  }
+
+  const res = await axios.post(`${SITE_URL}${path}`, body, {
+    headers: siteHeaders(),
+    timeout: 30000,
+  });
+
+  return res.data;
+}
+
+function getKookHeaders() {
+  return {
+    Authorization: `Bot ${TOKEN}`,
+    "Content-Type": "application/json",
+  };
+}
+
+async function getVoiceMembers(channelId = RANKED_INHOUSE_CHANNEL_ID) {
+  const res = await axios.get(`${API_BASE}/channel/user-list`, {
+    params: {
+      channel_id: channelId,
+    },
+    headers: getKookHeaders(),
+    timeout: 15000,
+  });
+
+  const users = res.data?.data?.items || res.data?.data || [];
+  if (!Array.isArray(users)) return [];
+
+  return users
+    .map((user) => ({
+      id: String(user.id || user.user_id || ""),
+      userId: String(user.id || user.user_id || ""),
+      username: user.username || user.nickname || user.name || "",
+      nickname: user.nickname || user.username || user.name || "",
+    }))
+    .filter((user) => user.id || user.userId);
+}
+
+async function moveVoiceUser(kookUserId, targetChannelId) {
+  const payloads = [
+    {
+      target_id: targetChannelId,
+      user_ids: [kookUserId],
+    },
+    {
+      channel_id: targetChannelId,
+      user_ids: [kookUserId],
+    },
+    {
+      target_id: targetChannelId,
+      user_id: kookUserId,
+    },
+  ];
+
+  let lastError = null;
+
+  for (const payload of payloads) {
+    try {
+      await axios.post(`${API_BASE}/channel/move-user`, payload, {
+        headers: getKookHeaders(),
+        timeout: 15000,
+      });
+      return true;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  const detail = lastError?.response?.data || lastError?.message || "unknown error";
+  console.error("Move user failed:", { kookUserId, targetChannelId, detail });
+  return false;
+}
+
+async function moveInhousePlayers(moveInstructions) {
+  const results = [];
+
+  for (const instruction of moveInstructions || []) {
+    const ok = await moveVoiceUser(instruction.kookUserId, instruction.targetChannelId);
+    results.push({
+      ...instruction,
+      ok,
+    });
+  }
+
+  return results;
 }
 
 async function getGateway() {
@@ -129,6 +255,16 @@ function getKookUsername(event) {
     event.extra?.user?.nickname ||
     ""
   );
+}
+
+function isAdminEvent(event) {
+  const kookUserId = getKookUserId(event);
+  return Boolean(kookUserId && ADMIN_KOOK_IDS.has(kookUserId));
+}
+
+function siteCommand(command) {
+  if (command === "!elo") return "!leaderboard";
+  return command;
 }
 
 async function verifyEclCode(event, code) {
@@ -188,6 +324,63 @@ async function verifyEclCode(event, code) {
   }
 }
 
+async function handleSiteCommand(event, command) {
+  const data = await callEclApi("/api/kook/commands", {
+    command: siteCommand(command),
+    kookUserId: getKookUserId(event),
+    isAdmin: isAdminEvent(event),
+  });
+
+  await sendChannelMessage(event.target_id, data.reply || "Command completed.");
+}
+
+async function handleStatusCommand(event, command) {
+  const members = await getVoiceMembers(RANKED_INHOUSE_CHANNEL_ID).catch(() => []);
+  const data = await callEclApi("/api/kook/commands", {
+    command: siteCommand(command),
+    kookUserId: getKookUserId(event),
+    members,
+    isAdmin: isAdminEvent(event),
+  });
+
+  await sendChannelMessage(event.target_id, data.reply || "Status checked.");
+}
+
+async function handleInhouseCommand(event, command) {
+  const members = await getVoiceMembers(RANKED_INHOUSE_CHANNEL_ID);
+  const data = await callEclApi("/api/kook/inhouse", {
+    command,
+    channelId: RANKED_INHOUSE_CHANNEL_ID,
+    members,
+  });
+
+  await sendChannelMessage(event.target_id, data.reply || "Inhouse command completed.");
+
+  if (command === "!ready" && Array.isArray(data.moveInstructions)) {
+    const moveResults = await moveInhousePlayers(data.moveInstructions);
+    const failed = moveResults.filter((result) => !result.ok);
+
+    if (failed.length === 0) {
+      await sendChannelMessage(event.target_id, "Players moved to Blue Side and Red Side.");
+      return;
+    }
+
+    await sendChannelMessage(
+      event.target_id,
+      `Teams are balanced, but I could not move ${failed.length} player(s). Please move manually if needed.`
+    );
+  }
+}
+
+async function handleReportCommand(event) {
+  const data = await callEclApi("/api/kook/inhouse/report", {
+    command: "!report",
+    reporterKookUserId: getKookUserId(event),
+  });
+
+  await sendChannelMessage(event.target_id, data.reply || "Report completed.");
+}
+
 async function handleCommand(event, command, args) {
   const targetId = event.target_id;
 
@@ -197,7 +390,11 @@ async function handleCommand(event, command, args) {
   }
 
   if (command === "!help" || command === "!commands") {
-    await sendChannelMessage(targetId, formatCommands());
+    try {
+      await handleSiteCommand(event, command);
+    } catch {
+      await sendChannelMessage(targetId, formatCommands());
+    }
     return;
   }
 
@@ -206,11 +403,49 @@ async function handleCommand(event, command, args) {
     return;
   }
 
-  if (command === "!elo" || command === "!leaderboard") {
-    await sendChannelMessage(
-      targetId,
-      `ELO leaderboard: ${getUrl("/stats/leaderboard")}`
-    );
+  if (
+    command === "!welcome" ||
+    command === "!me" ||
+    command === "!rank" ||
+    command === "!elo" ||
+    command === "!leaderboard"
+  ) {
+    try {
+      await handleSiteCommand(event, command);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Command failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!status" || command === "!cancel") {
+    try {
+      await handleStatusCommand(event, command);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Command failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!inhouse" || command === "!ready") {
+    try {
+      await handleInhouseCommand(event, command);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Inhouse command failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!report") {
+    try {
+      await handleReportCommand(event);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Report failed: ${message}`);
+    }
     return;
   }
 
@@ -245,7 +480,7 @@ function scheduleReconnect() {
 
 async function startBot() {
   const gatewayUrl = await getGateway();
-  console.log("Connecting to:", gatewayUrl);
+  console.log("Connecting to KOOK gateway");
 
   ws = new WebSocket(gatewayUrl);
   let lastSn = 0;
@@ -286,11 +521,20 @@ async function startBot() {
       event?.extra?.kmarkdown?.raw_content ?? event?.content ?? "";
     const content = String(rawContent).trim();
 
+    if (content) {
+      console.log("Received message", {
+        type: event.type,
+        targetId: event.target_id,
+        startsWithCommand: content.startsWith("!"),
+      });
+    }
+
     if (!content.startsWith("!")) return;
 
     const parts = content.split(/\s+/);
     const command = parts[0].toLowerCase();
     const args = parts.slice(1);
+    console.log("Handling command", { command, targetId: event.target_id });
     await handleCommand(event, command, args);
   });
 
