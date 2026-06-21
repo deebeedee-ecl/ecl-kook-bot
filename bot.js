@@ -11,7 +11,8 @@ const API_BASE = "https://www.kookapp.cn/api/v3";
 const SITE_URL = process.env.ECL_SITE_URL || "https://eclchina.lol";
 const KOOK_VERIFY_SECRET = process.env.ECL_KOOK_BOT_SECRET;
 const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID || "1969692300297863";
-const RANKED_INHOUSE_CHANNEL_ID = process.env.KOOK_RANKED_INHOUSE_CHANNEL_ID || "8024346698320304";
+const RANKED_INHOUSE_CATEGORY_ID = process.env.KOOK_RANKED_INHOUSE_CATEGORY_ID || "8024346698320304";
+const RANKED_INHOUSE_CHANNEL_ID = process.env.KOOK_RANKED_INHOUSE_CHANNEL_ID || "4175549527235352";
 const ADMIN_KOOK_IDS = new Set(
   String(process.env.ADMIN_KOOK_IDS || "")
     .split(",")
