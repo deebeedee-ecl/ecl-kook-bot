@@ -43,14 +43,16 @@ function formatCommands() {
     "- !rank",
     "- !elo / !leaderboard",
     "- !verify ECL-XXXXXX / !link ECL-XXXXXX",
-    "- !inhouse",
-    "- !ready",
+    "- !inhouse (check voice channel roster)",
+    "- !ready (balance teams + create IH #XXX)",
     "- !status",
-    "- !report",
+    "- !report (list unreported games)",
+    "- !report 1 (preview game from lzyumi)",
+    "- !confirm (submit previewed game)",
+    "- !cancel (cancel pending report or active session)",
     "- !refresh (admin)",
-    "- !cancel (admin)",
     "",
-    "Use !verify with your dashboard code to link your KOOK account to ECL.",
+    "Flow: !inhouse → !ready → play → !report → !report 1 → !confirm",
   ].join("\n");
 }
 
@@ -478,48 +480,209 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
   }
 }
 
-async function handleReportCommand(event) {
+// ──────────────────────────────────────────────────────────────────────────────
+// Multi-step !report state (in-memory; lost on restart, which is acceptable)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const pendingReports = new Map();
+// entry: {
+//   stage: "selecting" | "confirming",
+//   sessions: [...],          // from pending-sessions API
+//   selectedSession: {...},   // set in "confirming" stage
+//   rawMatchData: {...},      // set in "confirming" stage
+//   ts: Date.now(),
+// }
+const PENDING_REPORT_TTL_MS = 10 * 60 * 1000; // 10 min
+
+function clearStalePendingReports() {
+  const now = Date.now();
+  for (const [key, entry] of pendingReports.entries()) {
+    if (now - entry.ts > PENDING_REPORT_TTL_MS) pendingReports.delete(key);
+  }
+}
+
+function formatLzyumiMatchPreview(session, rawMatchData) {
+  const { profile, gameId, detail } = rawMatchData;
+
+  // Find the time string for this specific game
+  const games = Array.isArray(profile?.data) ? profile.data : [];
+  const matchEntry = games.find((g) => g?.gameId === gameId);
+  const timeStr = matchEntry?.titleTime || "unknown time";
+
+  // Group lzyumi players by their teamId
+  const players = detail?.data?.wgBattleDetailInfo || [];
+  const teamMap = {};
+  for (const p of players) {
+    const tid = String(p.teamId || "?");
+    if (!teamMap[tid]) teamMap[tid] = [];
+    const name = p.nickNameStr || p.nickName || "?";
+    teamMap[tid].push(name);
+  }
+
+  const teamEntries = Object.entries(teamMap);
+  const teamLines = teamEntries
+    .map(([, names], i) => `${i === 0 ? "Blue" : "Red"} Team: ${names.join(", ")}`)
+    .join("\n");
+
+  const label = session.gameLabel || "IH Game";
+  return [
+    `**${label}** — ${timeStr}`,
+    "",
+    teamLines || "(No player data found)",
+    "",
+    "Is this your game? Type **!confirm** to submit, or **!cancel** to abort.",
+  ].join("\n");
+}
+
+async function handleReportCommand(event, args) {
+  clearStalePendingReports();
   const kookUserId = getKookUserId(event);
   const targetId = event.target_id;
 
-  // Step 1: get the reporter's riot name + area from ECL
-  let reporterInfo = null;
-  try {
-    const res = await axios.get(`${SITE_URL}/api/kook/inhouse/reporter-info`, {
-      params: { kookUserId },
-      headers: {
-        "Content-Type": "application/json",
-        "x-ecl-kook-secret": KOOK_VERIFY_SECRET,
-      },
-      timeout: 15000,
+  // ── "!report N" — user picked a game from the list ────────────────────────
+  if (args.length > 0) {
+    const selection = parseInt(args[0], 10);
+    const entry = pendingReports.get(kookUserId);
+    let sessions = entry?.sessions;
+
+    // Re-fetch if no stored list or it's stale
+    if (!sessions) {
+      try {
+        const res = await axios.get(`${SITE_URL}/api/kook/inhouse/pending-sessions`, {
+          params: { kookUserId },
+          headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
+          timeout: 15000,
+        });
+        sessions = res.data?.sessions || [];
+      } catch (err) {
+        await sendChannelMessage(targetId, `Could not fetch pending sessions: ${err.message}`);
+        return;
+      }
+    }
+
+    if (!sessions || sessions.length === 0) {
+      await sendChannelMessage(targetId, "No pending inhouse games found.");
+      pendingReports.delete(kookUserId);
+      return;
+    }
+
+    const index = isNaN(selection) ? -1 : selection - 1;
+    if (index < 0 || index >= sessions.length) {
+      await sendChannelMessage(
+        targetId,
+        `Pick a number between 1 and ${sessions.length}. Type **!report** to see the list again.`,
+      );
+      return;
+    }
+
+    const selectedSession = sessions[index];
+    await sendChannelMessage(targetId, `Fetching lzyumi data for ${selectedSession.gameLabel || "the selected game"}…`);
+
+    // Get reporter info
+    let reporterInfo = null;
+    try {
+      const res = await axios.get(`${SITE_URL}/api/kook/inhouse/reporter-info`, {
+        params: { kookUserId },
+        headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
+        timeout: 15000,
+      });
+      reporterInfo = res.data;
+    } catch (err) {
+      await sendChannelMessage(targetId, `Could not get your ECL profile: ${err.response?.data?.message || err.message}`);
+      return;
+    }
+
+    // Fetch match from lzyumi
+    let rawMatchData = null;
+    try {
+      rawMatchData = await fetchLzyumiMatchForReport(reporterInfo.riotName, reporterInfo.areaId);
+    } catch (err) {
+      await sendChannelMessage(
+        targetId,
+        `Could not fetch your latest game from lzyumi: ${err.message}\n` +
+        `If Railway is IP-blocked, use the **Report Inhouse Game** button on the ECL website instead.`,
+      );
+      return;
+    }
+
+    // Store in pending map and show preview
+    pendingReports.set(kookUserId, {
+      stage: "confirming",
+      sessions,
+      selectedSession,
+      rawMatchData,
+      ts: Date.now(),
     });
-    reporterInfo = res.data;
-  } catch (err) {
-    const message = err.response?.data?.message || err.message;
-    await sendChannelMessage(targetId, `Report failed: ${message}`);
+
+    const preview = formatLzyumiMatchPreview(selectedSession, rawMatchData);
+    await sendChannelMessage(targetId, preview);
     return;
   }
 
-  // Step 2: fetch latest lzyumi match from residential IP (bot machine)
-  let rawMatchData = null;
+  // ── "!report" with no args — show the game list ───────────────────────────
+  let sessions;
   try {
-    rawMatchData = await fetchLzyumiMatchForReport(reporterInfo.riotName, reporterInfo.areaId);
+    const res = await axios.get(`${SITE_URL}/api/kook/inhouse/pending-sessions`, {
+      params: { kookUserId },
+      headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
+      timeout: 15000,
+    });
+    sessions = res.data?.sessions || [];
   } catch (err) {
-    console.error("Lzyumi fetch failed:", err.message);
-    // Continue without raw data — server will attempt its own fetch
+    await sendChannelMessage(targetId, `Could not fetch inhouse sessions: ${err.message}`);
+    return;
   }
 
-  // Step 3: send to ECL report endpoint
+  if (sessions.length === 0) {
+    await sendChannelMessage(
+      targetId,
+      "No pending inhouse games found. Start a game with **!inhouse** and **!ready** first.",
+    );
+    return;
+  }
+
+  // Store session list in pending map
+  pendingReports.set(kookUserId, { stage: "selecting", sessions, ts: Date.now() });
+
+  const lines = sessions.map((s, i) => {
+    const date = new Date(s.createdAt).toLocaleString("en-US", {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    return `${i + 1}. **${s.gameLabel || "IH Game"}** — ${date}`;
+  });
+
+  await sendChannelMessage(
+    targetId,
+    ["Pending inhouse games:", ...lines, "", "Type **!report 1** (or the number) to preview and confirm."].join("\n"),
+  );
+}
+
+async function handleConfirmCommand(event) {
+  clearStalePendingReports();
+  const kookUserId = getKookUserId(event);
+  const targetId = event.target_id;
+
+  const entry = pendingReports.get(kookUserId);
+  if (!entry || entry.stage !== "confirming") {
+    await sendChannelMessage(
+      targetId,
+      "Nothing to confirm. Type **!report** to start the report flow.",
+    );
+    return;
+  }
+
+  const { selectedSession, rawMatchData } = entry;
+
   const body = {
     command: "!report",
     reporterKookUserId: kookUserId,
+    sessionId: selectedSession.id,
+    rawMatchData,
   };
-  if (rawMatchData) {
-    body.rawMatchData = rawMatchData;
-  }
 
   const data = await callEclApi("/api/kook/inhouse/report", body);
-  await sendChannelMessage(targetId, data.reply || "Report completed.");
+  pendingReports.delete(kookUserId);
+  await sendChannelMessage(targetId, data.reply || "Match reported successfully.");
 }
 
 const REFRESH_DELAY_MS = 2000;
@@ -646,7 +809,7 @@ async function handleCommand(event, command, args) {
     return;
   }
 
-  if (command === "!status" || command === "!cancel") {
+  if (command === "!status") {
     try {
       await handleStatusCommand(event, command);
     } catch (err) {
@@ -682,10 +845,36 @@ async function handleCommand(event, command, args) {
 
   if (command === "!report") {
     try {
-      await handleReportCommand(event);
+      await handleReportCommand(event, args);
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Report failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!confirm") {
+    try {
+      await handleConfirmCommand(event);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Confirm failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!cancel") {
+    const kookUserId = getKookUserId(event);
+    if (pendingReports.has(kookUserId)) {
+      pendingReports.delete(kookUserId);
+      await sendChannelMessage(targetId, "Cancelled. Type !report to start again.");
+    } else {
+      try {
+        await handleStatusCommand(event, "!cancel");
+      } catch (err) {
+        const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+        await sendChannelMessage(targetId, `Command failed: ${message}`);
+      }
     }
     return;
   }
