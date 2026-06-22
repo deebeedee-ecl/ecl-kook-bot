@@ -651,9 +651,20 @@ async function handleReportCommand(event, args) {
     return `${i + 1}. **${s.gameLabel || "IH Game"}** — ${date}`;
   });
 
+  // Always include the one-click browser link (bypasses IP block)
+  const autoReportUrl = `${SITE_URL}/hub/me?autoreport=1`;
+
   await sendChannelMessage(
     targetId,
-    ["Pending inhouse games:", ...lines, "", "Type **!report 1** (or the number) to preview and confirm."].join("\n"),
+    [
+      "Pending inhouse games:",
+      ...lines,
+      "",
+      `**One-click report → ${autoReportUrl}**`,
+      "(Opens your ECL profile and auto-submits the game — fastest method)",
+      "",
+      "Or type **!report 1** to preview first, then **!confirm** to submit.",
+    ].join("\n"),
   );
 }
 
