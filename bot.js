@@ -3,6 +3,7 @@
 const WebSocket = require("ws");
 const axios = require("axios");
 const zlib = require("zlib");
+const crypto = require("crypto");
 
 console.log("ECL info bot starting");
 
@@ -45,6 +46,7 @@ function formatCommands() {
     "- !ready",
     "- !status",
     "- !report",
+    "- !refresh (admin)",
     "- !cancel (admin)",
     "",
     "Use !verify with your dashboard code to link your KOOK account to ECL.",
@@ -347,6 +349,106 @@ async function handleStatusCommand(event, command) {
   await sendChannelMessage(event.target_id, data.reply || "Status checked.");
 }
 
+// ─── Lzyumi helpers (runs on bot machine = residential IP, not cloud-blocked) ──
+
+const LZYUMI_BASE = "https://a.2025lol.top/lzyumi/lol/info";
+
+const CHINA_SERVERS = {
+  1: "艾欧尼亚",
+  14: "黑色玫瑰",
+  31: "峡谷之巅",
+  30: "男爵领域",
+  3: "祖安",
+  4: "诺克萨斯",
+  16: "恕瑞玛",
+};
+
+function createLzyumiSignature() {
+  const now = new Date();
+  const MM = String(now.getMonth() + 1);
+  const DD = String(now.getDate());
+  const HH = String(now.getHours());
+  const mm = String(now.getMinutes());
+  const ss = String(now.getSeconds());
+  const signSource = `dld${MM.padStart(2, "0")}o${DD.padStart(2, "0")}u${HH.padStart(2, "0")}d${mm.padStart(2, "0")}o${ss.padStart(2, "0")}dld`;
+  const lzyumiSign = crypto.createHash("md5").update(signSource).digest("hex");
+  const signStr = `${MM}${DD}${HH}${mm}${ss}${MM.length * 3}${DD.length * 3}${HH.length * 3}${mm.length * 3}${ss.length * 3}`;
+  return { lzyumiSign, signStr };
+}
+
+const LZYUMI_HEADERS = {
+  Accept: "application/json, text/plain, */*",
+  Referer: "https://a.2025lol.top/",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+};
+
+async function lzyumiFetch(url) {
+  const res = await axios.get(url, { headers: LZYUMI_HEADERS, timeout: 15000 });
+  return res.data;
+}
+
+async function fetchLzyumiProfile(riotName, areaId, filter = 1, allCount = 10) {
+  const { lzyumiSign, signStr } = createLzyumiSignature();
+  const areaName = CHINA_SERVERS[areaId] || CHINA_SERVERS[1];
+  const encoded = riotName.trim().replace(/#/g, "*~*~*");
+  const params = [
+    `nickname=${encodeURIComponent(encoded)}`,
+    `allCount=${allCount}`,
+    `areaId=${areaId}`,
+    `areaName=${encodeURIComponent(areaName)}`,
+    "seleMe=1",
+    `filter=${filter}`,
+    "openId=",
+    `lzyumiSign=${lzyumiSign}`,
+    `signStr=${signStr}`,
+  ];
+  return lzyumiFetch(`${LZYUMI_BASE}?${params.join("&")}`);
+}
+
+async function fetchLzyumiDetail(openId, gameId, areaId) {
+  const { lzyumiSign, signStr } = createLzyumiSignature();
+  const url = new URL(`${LZYUMI_BASE}/findOrderDetailInfoAll`);
+  url.searchParams.set("openId", openId);
+  url.searchParams.set("gameId", gameId);
+  url.searchParams.set("areaId", String(areaId));
+  url.searchParams.set("lzyumiSign", lzyumiSign);
+  url.searchParams.set("signStr", signStr);
+  return lzyumiFetch(url.toString());
+}
+
+async function fetchLzyumiRankedGames(riotName, riotTag, areaId) {
+  const nickname = riotTag ? `${riotName}#${riotTag}` : riotName;
+  const [soloJson, flexJson] = await Promise.all([
+    fetchLzyumiProfile(nickname, areaId, 2, 20),
+    fetchLzyumiProfile(nickname, areaId, 3, 20),
+  ]);
+  return {
+    soloGames: Array.isArray(soloJson?.data) ? soloJson.data : [],
+    flexGames: Array.isArray(flexJson?.data) ? flexJson.data : [],
+  };
+}
+
+async function fetchLzyumiMatchForReport(riotName, areaId) {
+  const profile = await fetchLzyumiProfile(riotName, areaId);
+  const openId = profile?.battleInfo?.openId;
+  const games = Array.isArray(profile?.data) ? profile.data : [];
+  const latestGame = games.find((g) => g?.gameId);
+
+  if (!openId || !latestGame?.gameId) {
+    throw new Error(`Could not get openId or gameId from lzyumi for ${riotName}`);
+  }
+
+  const detail = await fetchLzyumiDetail(openId, latestGame.gameId, areaId);
+
+  return {
+    profile,
+    gameId: latestGame.gameId,
+    detail,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 async function handleInhouseCommand(event, command) {
   const members = await getVoiceMembers(RANKED_INHOUSE_CHANNEL_ID);
   const data = await callEclApi("/api/kook/inhouse", {
@@ -374,12 +476,133 @@ async function handleInhouseCommand(event, command) {
 }
 
 async function handleReportCommand(event) {
-  const data = await callEclApi("/api/kook/inhouse/report", {
-    command: "!report",
-    reporterKookUserId: getKookUserId(event),
-  });
+  const kookUserId = getKookUserId(event);
+  const targetId = event.target_id;
 
-  await sendChannelMessage(event.target_id, data.reply || "Report completed.");
+  // Step 1: get the reporter's riot name + area from ECL
+  let reporterInfo = null;
+  try {
+    const res = await axios.get(`${SITE_URL}/api/kook/inhouse/reporter-info`, {
+      params: { kookUserId },
+      headers: {
+        "Content-Type": "application/json",
+        "x-ecl-kook-secret": KOOK_VERIFY_SECRET,
+      },
+      timeout: 15000,
+    });
+    reporterInfo = res.data;
+  } catch (err) {
+    const message = err.response?.data?.message || err.message;
+    await sendChannelMessage(targetId, `Report failed: ${message}`);
+    return;
+  }
+
+  // Step 2: fetch latest lzyumi match from residential IP (bot machine)
+  let rawMatchData = null;
+  try {
+    rawMatchData = await fetchLzyumiMatchForReport(reporterInfo.riotName, reporterInfo.areaId);
+  } catch (err) {
+    console.error("Lzyumi fetch failed:", err.message);
+    // Continue without raw data — server will attempt its own fetch
+  }
+
+  // Step 3: send to ECL report endpoint
+  const body = {
+    command: "!report",
+    reporterKookUserId: kookUserId,
+  };
+  if (rawMatchData) {
+    body.rawMatchData = rawMatchData;
+  }
+
+  const data = await callEclApi("/api/kook/inhouse/report", body);
+  await sendChannelMessage(targetId, data.reply || "Report completed.");
+}
+
+const REFRESH_DELAY_MS = 2000;
+
+async function handleRefreshCommand(event) {
+  const targetId = event.target_id;
+
+  if (!isAdminEvent(event)) {
+    await sendChannelMessage(targetId, "Only admins can use !refresh.");
+    return;
+  }
+
+  if (!KOOK_VERIFY_SECRET) {
+    await sendChannelMessage(targetId, "Missing ECL_KOOK_BOT_SECRET — cannot authenticate with ECL.");
+    return;
+  }
+
+  // Get stale/new players from ECL
+  let profiles;
+  try {
+    const res = await axios.get(`${SITE_URL}/api/kook/refresh-players`, {
+      headers: { "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
+      timeout: 15000,
+    });
+    profiles = res.data?.profiles || [];
+  } catch (err) {
+    await sendChannelMessage(targetId, `Refresh failed: ${err.response?.data?.message || err.message}`);
+    return;
+  }
+
+  if (profiles.length === 0) {
+    await sendChannelMessage(targetId, "All profiles are up to date. Nothing to refresh.");
+    return;
+  }
+
+  await sendChannelMessage(targetId, `Refreshing ${profiles.length} player(s)... I will report back when done.`);
+
+  let refreshed = 0;
+  let failed = 0;
+  const failedNames = [];
+
+  for (const player of profiles) {
+    try {
+      const nickname = player.riotTag
+        ? `${player.riotName}#${player.riotTag}`
+        : player.riotName;
+      const areaId = player.chinaServerId || 1;
+
+      const [rawProfile, ranked] = await Promise.all([
+        fetchLzyumiProfile(nickname, areaId, 1, 10),
+        fetchLzyumiRankedGames(player.riotName, player.riotTag, areaId),
+      ]);
+
+      if (!rawProfile?.battleInfo) {
+        console.warn(`[refresh] No battleInfo for ${player.displayName}`);
+        failed++;
+        failedNames.push(player.displayName);
+      } else {
+        await axios.post(
+          `${SITE_URL}/api/kook/save-player-stats`,
+          {
+            profileId: player.id,
+            rawProfile,
+            soloGames: ranked.soloGames,
+            flexGames: ranked.flexGames,
+          },
+          {
+            headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
+            timeout: 15000,
+          }
+        );
+        refreshed++;
+        console.log(`[refresh] ✓ ${player.displayName} solo=${ranked.soloGames.length} flex=${ranked.flexGames.length}`);
+      }
+    } catch (err) {
+      console.error(`[refresh] ✗ ${player.displayName}:`, err.message);
+      failed++;
+      failedNames.push(player.displayName);
+    }
+
+    await new Promise((r) => setTimeout(r, REFRESH_DELAY_MS));
+  }
+
+  const summary = [`Refresh complete. ${refreshed}/${profiles.length} updated.`];
+  if (failedNames.length > 0) summary.push(`Failed: ${failedNames.join(", ")}`);
+  await sendChannelMessage(targetId, summary.join(" "));
 }
 
 async function handleCommand(event, command, args) {
@@ -446,6 +669,16 @@ async function handleCommand(event, command, args) {
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Report failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!refresh") {
+    try {
+      await handleRefreshCommand(event);
+    } catch (err) {
+      const message = err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Refresh failed: ${message}`);
     }
     return;
   }
