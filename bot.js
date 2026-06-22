@@ -14,12 +14,13 @@ const KOOK_VERIFY_SECRET = process.env.ECL_KOOK_BOT_SECRET;
 const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID || "1969692300297863";
 const RANKED_INHOUSE_CATEGORY_ID = process.env.KOOK_RANKED_INHOUSE_CATEGORY_ID || "8024346698320304";
 const RANKED_INHOUSE_CHANNEL_ID = process.env.KOOK_RANKED_INHOUSE_CHANNEL_ID || "4175549527235352";
-const ADMIN_KOOK_IDS = new Set(
-  String(process.env.ADMIN_KOOK_IDS || "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean)
-);
+const ADMIN_KOOK_IDS = new Set([
+  "678146923",    // doolittlesy
+  "3929770295",   // MAD CUZ BAD
+  "2796070748",   // Dixon
+  "3149507900",   // muiri
+  ...String(process.env.ADMIN_KOOK_IDS || "").split(",").map((id) => id.trim()).filter(Boolean),
+]);
 const RECONNECT_DELAY_MS = 5000;
 
 if (!TOKEN) {
