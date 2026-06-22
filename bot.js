@@ -450,17 +450,18 @@ async function fetchLzyumiMatchForReport(riotName, areaId) {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
-async function handleInhouseCommand(event, command) {
+async function handleInhouseCommand(event, command, forceAdmin = false) {
   const members = await getVoiceMembers(RANKED_INHOUSE_CHANNEL_ID);
   const data = await callEclApi("/api/kook/inhouse", {
-    command,
+    command: command === "!forceready" ? "!ready" : command,
     channelId: RANKED_INHOUSE_CHANNEL_ID,
     members,
+    isAdmin: forceAdmin || isAdminEvent(event),
   });
 
   await sendChannelMessage(event.target_id, data.reply || "Inhouse command completed.");
 
-  if (command === "!ready" && Array.isArray(data.moveInstructions)) {
+  if ((command === "!ready" || command === "!forceready") && Array.isArray(data.moveInstructions)) {
     const moveResults = await moveInhousePlayers(data.moveInstructions);
     const failed = moveResults.filter((result) => !result.ok);
 
@@ -660,6 +661,20 @@ async function handleCommand(event, command, args) {
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Inhouse command failed: ${message}`);
+    }
+    return;
+  }
+
+  if (command === "!forceready") {
+    if (!isAdminEvent(event)) {
+      await sendChannelMessage(targetId, "Only admins can use !forceready.");
+      return;
+    }
+    try {
+      await handleInhouseCommand(event, "!forceready", true);
+    } catch (err) {
+      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      await sendChannelMessage(targetId, `Forceready failed: ${message}`);
     }
     return;
   }
