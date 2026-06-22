@@ -158,13 +158,14 @@ async function getVoiceMembers(channelId = RANKED_INHOUSE_CHANNEL_ID) {
   if (!Array.isArray(users)) return [];
 
   return users
-    .map((user) => ({
-      id: String(user.id || user.user_id || ""),
-      userId: String(user.id || user.user_id || ""),
-      username: user.username || user.nickname || user.name || "",
-      nickname: user.nickname || user.username || user.name || "",
-    }))
-    .filter((user) => user.id || user.userId);
+    .map((user) => {
+      // Kook returns either flat { id, username } or nested { user: { id, username } }
+      const u = user.user || user;
+      const id = String(u.id || u.user_id || user.id || user.user_id || "");
+      const username = u.username || u.nickname || u.name || user.username || user.nickname || "";
+      return { id, userId: id, username, nickname: username };
+    })
+    .filter((user) => user.id);
 }
 
 async function moveVoiceUser(kookUserId, targetChannelId) {
