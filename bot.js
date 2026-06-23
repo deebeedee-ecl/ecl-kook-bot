@@ -46,13 +46,11 @@ function formatCommands() {
     "- !inhouse (check voice channel roster)",
     "- !ready (balance teams + create IH #XXX)",
     "- !status",
-    "- !report (list unreported games)",
-    "- !report 1 (preview game from lzyumi)",
-    "- !confirm (submit previewed game)",
-    "- !cancel (cancel pending report or active session)",
+    "- !report (get your one-click report link)",
+    "- !cancel (cancel active session)",
     "- !refresh (admin)",
     "",
-    "Flow: !inhouse → !ready → play → !report → !report 1 → !confirm",
+    "Flow: !inhouse → !ready → play → !report (opens ECL website to confirm & submit)",
   ].join("\n");
 }
 
@@ -481,219 +479,23 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Multi-step !report state (in-memory; lost on restart, which is acceptable)
+// !report — sends one-click web link so user confirms in the browser
+// (lzyumi fetches work on residential IP, not cloud; website handles it)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const pendingReports = new Map();
-// entry: {
-//   stage: "selecting" | "confirming",
-//   sessions: [...],          // from pending-sessions API
-//   selectedSession: {...},   // set in "confirming" stage
-//   rawMatchData: {...},      // set in "confirming" stage
-//   ts: Date.now(),
-// }
-const PENDING_REPORT_TTL_MS = 10 * 60 * 1000; // 10 min
-
-function clearStalePendingReports() {
-  const now = Date.now();
-  for (const [key, entry] of pendingReports.entries()) {
-    if (now - entry.ts > PENDING_REPORT_TTL_MS) pendingReports.delete(key);
-  }
-}
-
-function formatLzyumiMatchPreview(session, rawMatchData) {
-  const { profile, gameId, detail } = rawMatchData;
-
-  // Find the time string for this specific game
-  const games = Array.isArray(profile?.data) ? profile.data : [];
-  const matchEntry = games.find((g) => g?.gameId === gameId);
-  const timeStr = matchEntry?.titleTime || "unknown time";
-
-  // Group lzyumi players by their teamId
-  const players = detail?.data?.wgBattleDetailInfo || [];
-  const teamMap = {};
-  for (const p of players) {
-    const tid = String(p.teamId || "?");
-    if (!teamMap[tid]) teamMap[tid] = [];
-    const name = p.nickNameStr || p.nickName || "?";
-    teamMap[tid].push(name);
-  }
-
-  const teamEntries = Object.entries(teamMap);
-  const teamLines = teamEntries
-    .map(([, names], i) => `${i === 0 ? "Blue" : "Red"} Team: ${names.join(", ")}`)
-    .join("\n");
-
-  const label = session.gameLabel || "IH Game";
-  return [
-    `**${label}** — ${timeStr}`,
-    "",
-    teamLines || "(No player data found)",
-    "",
-    "Is this your game? Type **!confirm** to submit, or **!cancel** to abort.",
-  ].join("\n");
-}
-
-async function handleReportCommand(event, args) {
-  clearStalePendingReports();
-  const kookUserId = getKookUserId(event);
+async function handleReportCommand(event) {
   const targetId = event.target_id;
-
-  // ── "!report N" — user picked a game from the list ────────────────────────
-  if (args.length > 0) {
-    const selection = parseInt(args[0], 10);
-    const entry = pendingReports.get(kookUserId);
-    let sessions = entry?.sessions;
-
-    // Re-fetch if no stored list or it's stale
-    if (!sessions) {
-      try {
-        const res = await axios.get(`${SITE_URL}/api/kook/inhouse/pending-sessions`, {
-          params: { kookUserId },
-          headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
-          timeout: 15000,
-        });
-        sessions = res.data?.sessions || [];
-      } catch (err) {
-        await sendChannelMessage(targetId, `Could not fetch pending sessions: ${err.message}`);
-        return;
-      }
-    }
-
-    if (!sessions || sessions.length === 0) {
-      await sendChannelMessage(targetId, "No pending inhouse games found.");
-      pendingReports.delete(kookUserId);
-      return;
-    }
-
-    const index = isNaN(selection) ? -1 : selection - 1;
-    if (index < 0 || index >= sessions.length) {
-      await sendChannelMessage(
-        targetId,
-        `Pick a number between 1 and ${sessions.length}. Type **!report** to see the list again.`,
-      );
-      return;
-    }
-
-    const selectedSession = sessions[index];
-    await sendChannelMessage(targetId, `Fetching lzyumi data for ${selectedSession.gameLabel || "the selected game"}…`);
-
-    // Get reporter info
-    let reporterInfo = null;
-    try {
-      const res = await axios.get(`${SITE_URL}/api/kook/inhouse/reporter-info`, {
-        params: { kookUserId },
-        headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
-        timeout: 15000,
-      });
-      reporterInfo = res.data;
-    } catch (err) {
-      await sendChannelMessage(targetId, `Could not get your ECL profile: ${err.response?.data?.message || err.message}`);
-      return;
-    }
-
-    // Fetch match from lzyumi
-    let rawMatchData = null;
-    try {
-      rawMatchData = await fetchLzyumiMatchForReport(reporterInfo.riotName, reporterInfo.areaId);
-    } catch (err) {
-      await sendChannelMessage(
-        targetId,
-        `Could not fetch your latest game from lzyumi: ${err.message}\n` +
-        `If Railway is IP-blocked, use the **Report Inhouse Game** button on the ECL website instead.`,
-      );
-      return;
-    }
-
-    // Store in pending map and show preview
-    pendingReports.set(kookUserId, {
-      stage: "confirming",
-      sessions,
-      selectedSession,
-      rawMatchData,
-      ts: Date.now(),
-    });
-
-    const preview = formatLzyumiMatchPreview(selectedSession, rawMatchData);
-    await sendChannelMessage(targetId, preview);
-    return;
-  }
-
-  // ── "!report" with no args — show the game list ───────────────────────────
-  let sessions;
-  try {
-    const res = await axios.get(`${SITE_URL}/api/kook/inhouse/pending-sessions`, {
-      params: { kookUserId },
-      headers: { "Content-Type": "application/json", "x-ecl-kook-secret": KOOK_VERIFY_SECRET },
-      timeout: 15000,
-    });
-    sessions = res.data?.sessions || [];
-  } catch (err) {
-    await sendChannelMessage(targetId, `Could not fetch inhouse sessions: ${err.message}`);
-    return;
-  }
-
-  if (sessions.length === 0) {
-    await sendChannelMessage(
-      targetId,
-      "No pending inhouse games found. Start a game with **!inhouse** and **!ready** first.",
-    );
-    return;
-  }
-
-  // Store session list in pending map
-  pendingReports.set(kookUserId, { stage: "selecting", sessions, ts: Date.now() });
-
-  const lines = sessions.map((s, i) => {
-    const date = new Date(s.createdAt).toLocaleString("en-US", {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
-    });
-    return `${i + 1}. **${s.gameLabel || "IH Game"}** — ${date}`;
-  });
-
-  // Always include the one-click browser link (bypasses IP block)
-  const autoReportUrl = `${SITE_URL}/hub/me?autoreport=1`;
-
+  const reportUrl = `${SITE_URL}/hub/me/report-inhouse`;
   await sendChannelMessage(
     targetId,
     [
-      "Pending inhouse games:",
-      ...lines,
+      "**Report your inhouse game on the ECL website:**",
+      `→ ${reportUrl}`,
       "",
-      `**One-click report → ${autoReportUrl}**`,
-      "(Opens your ECL profile and auto-submits the game — fastest method)",
-      "",
-      "Or type **!report 1** to preview first, then **!confirm** to submit.",
+      "Log in, review the detected game, and confirm with one click.",
+      "(The site fetches your latest game directly — no extra steps needed)",
     ].join("\n"),
   );
-}
-
-async function handleConfirmCommand(event) {
-  clearStalePendingReports();
-  const kookUserId = getKookUserId(event);
-  const targetId = event.target_id;
-
-  const entry = pendingReports.get(kookUserId);
-  if (!entry || entry.stage !== "confirming") {
-    await sendChannelMessage(
-      targetId,
-      "Nothing to confirm. Type **!report** to start the report flow.",
-    );
-    return;
-  }
-
-  const { selectedSession, rawMatchData } = entry;
-
-  const body = {
-    command: "!report",
-    reporterKookUserId: kookUserId,
-    sessionId: selectedSession.id,
-    rawMatchData,
-  };
-
-  const data = await callEclApi("/api/kook/inhouse/report", body);
-  pendingReports.delete(kookUserId);
-  await sendChannelMessage(targetId, data.reply || "Match reported successfully.");
 }
 
 const REFRESH_DELAY_MS = 2000;
@@ -856,7 +658,7 @@ async function handleCommand(event, command, args) {
 
   if (command === "!report") {
     try {
-      await handleReportCommand(event, args);
+      await handleReportCommand(event);
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Report failed: ${message}`);
@@ -864,28 +666,12 @@ async function handleCommand(event, command, args) {
     return;
   }
 
-  if (command === "!confirm") {
+  if (command === "!cancel") {
     try {
-      await handleConfirmCommand(event);
+      await handleStatusCommand(event, "!cancel");
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
-      await sendChannelMessage(targetId, `Confirm failed: ${message}`);
-    }
-    return;
-  }
-
-  if (command === "!cancel") {
-    const kookUserId = getKookUserId(event);
-    if (pendingReports.has(kookUserId)) {
-      pendingReports.delete(kookUserId);
-      await sendChannelMessage(targetId, "Cancelled. Type !report to start again.");
-    } else {
-      try {
-        await handleStatusCommand(event, "!cancel");
-      } catch (err) {
-        const message = err.response?.data?.reply || err.response?.data?.message || err.message;
-        await sendChannelMessage(targetId, `Command failed: ${message}`);
-      }
+      await sendChannelMessage(targetId, `Command failed: ${message}`);
     }
     return;
   }
