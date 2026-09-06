@@ -46,11 +46,12 @@ function formatCommands() {
     "- !inhouse (check voice channel roster)",
     "- !ready (balance teams + create IH #XXX)",
     "- !status",
-    "- !report (get your one-click report link)",
+    "- !report / !result (preview your completed inhouse report)",
+    "- !yes / !no (submit or cancel the report preview)",
     "- !cancel (cancel active session)",
     "- !refresh (admin)",
     "",
-    "Flow: !inhouse → !ready → play → !report (opens ECL website to confirm & submit)",
+    "Flow: !inhouse → !ready → play → !report → !yes",
   ].join("\n");
 }
 
@@ -478,24 +479,14 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// !report — sends one-click web link so user confirms in the browser
-// (lzyumi fetches work on residential IP, not cloud; website handles it)
-// ──────────────────────────────────────────────────────────────────────────────
+async function handleReportCommand(event, command, args = []) {
+  const data = await callEclApi("/api/kook/commands", {
+    command: [siteCommand(command), ...args].join(" "),
+    kookUserId: getKookUserId(event),
+    isAdmin: isAdminEvent(event),
+  });
 
-async function handleReportCommand(event) {
-  const targetId = event.target_id;
-  const reportUrl = `${SITE_URL}/hub/me/report-inhouse`;
-  await sendChannelMessage(
-    targetId,
-    [
-      "**Report your inhouse game on the ECL website:**",
-      `→ ${reportUrl}`,
-      "",
-      "Log in, review the detected game, and confirm with one click.",
-      "(The site fetches your latest game directly — no extra steps needed)",
-    ].join("\n"),
-  );
+  await sendChannelMessage(event.target_id, data.reply || "Report command completed.");
 }
 
 const REFRESH_DELAY_MS = 2000;
@@ -656,9 +647,9 @@ async function handleCommand(event, command, args) {
     return;
   }
 
-  if (command === "!report") {
+  if (command === "!report" || command === "!result" || command === "!yes" || command === "!confirm" || command === "!no") {
     try {
-      await handleReportCommand(event);
+      await handleReportCommand(event, command, args);
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Report failed: ${message}`);
@@ -790,5 +781,4 @@ startBot().catch((err) => {
   console.error("Initial startBot error:", err.message);
   scheduleReconnect();
 });
-
 
