@@ -483,6 +483,7 @@ async function handleReportCommand(event, command, args = []) {
   const data = await callEclApi("/api/kook/commands", {
     command: [siteCommand(command), ...args].join(" "),
     kookUserId: getKookUserId(event),
+    channelId: event.target_id,
     isAdmin: isAdminEvent(event),
   });
 
@@ -781,4 +782,3 @@ startBot().catch((err) => {
   console.error("Initial startBot error:", err.message);
   scheduleReconnect();
 });
-
