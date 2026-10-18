@@ -33,26 +33,7 @@ function getUrl(path) {
 }
 
 function formatCommands() {
-  return [
-    "ECL Bot Commands",
-    "",
-    "- !ping",
-    "- !help / !commands",
-    "- !welcome",
-    "- !me",
-    "- !rank",
-    "- !elo / !leaderboard",
-    "- !verify ECL-XXXXXX / !link ECL-XXXXXX",
-    "- !inhouse (check voice channel roster)",
-    "- !ready (balance teams + create IH #XXX)",
-    "- !status",
-    "- !report / !result (preview your completed inhouse report)",
-    "- !yes / !no (submit or cancel the report preview)",
-    "- !cancel (cancel active session)",
-    "- !refresh (admin)",
-    "",
-    "Flow: !inhouse → !ready → play → !report → !yes",
-  ].join("\n");
+  return ['ECL Commands', '', '!hub - download and connect ECL Hub', '!verify CODE - link your KOOK account', '!me / !rank / !leaderboard', '!inhouse / !ready - roster and balanced teams', '!report IH GAME_ID - collect through your Hub', '!status IH - collection and review progress', '!no IH - cancel your unsubmitted report', '!cancel IH - administrator: cancel that inhouse', '', 'Flow: !inhouse > !ready > play > !report IH GAME_ID > Hub upload > admin review', 'Hub: KOOK > ECL HUB DESKTOP APP (channel 5590769063605712), pinned installer', 'No !yes confirmation or automatic LP for app reports.'].join('\n');
 }
 
 function formatWelcomeMessage() {
@@ -340,10 +321,11 @@ async function handleSiteCommand(event, command) {
   await sendChannelMessage(event.target_id, data.reply || "Command completed.");
 }
 
-async function handleStatusCommand(event, command) {
+async function handleStatusCommand(event, command, args = []) {
   const members = await getVoiceMembers(RANKED_INHOUSE_CHANNEL_ID).catch(() => []);
   const data = await callEclApi("/api/kook/commands", {
-    command: siteCommand(command),
+    command: [siteCommand(command), ...args].join(" "),
+    channelId: event.target_id,
     kookUserId: getKookUserId(event),
     members,
     isAdmin: isAdminEvent(event),
@@ -463,7 +445,7 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
 
   await sendChannelMessage(event.target_id, data.reply || "Inhouse command completed.");
 
-  if ((command === "!ready" || command === "!forceready") && Array.isArray(data.moveInstructions)) {
+  if ((command === "!ready" || command === "!forceready") && Array.isArray(data.moveInstructions) && data.moveInstructions.length > 0) {
     const moveResults = await moveInhousePlayers(data.moveInstructions);
     const failed = moveResults.filter((result) => !result.ok);
 
@@ -479,6 +461,21 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
   }
 }
 
+const hubReminderJobs = new Set();
+function scheduleHubReminder(event, data) {
+  const job = data.reportRequest;
+  if (data.status !== 'WAITING_FOR_HUB' || !job?.id || hubReminderJobs.has(job.id)) return;
+  hubReminderJobs.add(job.id);
+  const timer = setTimeout(async () => {
+    try {
+      const saved = await callEclApi('/api/kook/commands', { command: '!status ' + job.selector, kookUserId: getKookUserId(event) });
+      if (saved.status === 'WAITING_FOR_HUB' && saved.reportRequest?.id === job.id) await sendChannelMessage(event.target_id, 'Your report is still waiting for Hub. Open ECL Hub, sign in, connect League, then Collector > Connect reporting. Download/setup: KOOK > ECL HUB DESKTOP APP (channel 5590769063605712), pinned installer\nCheck progress: !status ' + job.selector);
+    } catch { /* Best-effort reminder only; !status remains authoritative. */ }
+  }, 60000);
+  timer.unref();
+  const cleanup = setTimeout(() => hubReminderJobs.delete(job.id), 3600000); cleanup.unref();
+}
+
 async function handleReportCommand(event, command, args = []) {
   const data = await callEclApi("/api/kook/commands", {
     command: [siteCommand(command), ...args].join(" "),
@@ -488,6 +485,7 @@ async function handleReportCommand(event, command, args = []) {
   });
 
   await sendChannelMessage(event.target_id, data.reply || "Report command completed.");
+  if (["!report", "!result"].includes(command)) scheduleHubReminder(event, data);
 }
 
 const REFRESH_DELAY_MS = 2000;
@@ -599,6 +597,7 @@ async function handleCommand(event, command, args) {
   }
 
   if (
+    command === "!hub" ||
     command === "!welcome" ||
     command === "!me" ||
     command === "!rank" ||
@@ -616,7 +615,7 @@ async function handleCommand(event, command, args) {
 
   if (command === "!status") {
     try {
-      await handleStatusCommand(event, command);
+      await handleStatusCommand(event, command, args);
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Command failed: ${message}`);
@@ -635,16 +634,7 @@ async function handleCommand(event, command, args) {
   }
 
   if (command === "!forceready") {
-    if (!isAdminEvent(event)) {
-      await sendChannelMessage(targetId, "Only admins can use !forceready.");
-      return;
-    }
-    try {
-      await handleInhouseCommand(event, "!forceready", true);
-    } catch (err) {
-      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
-      await sendChannelMessage(targetId, `Forceready failed: ${message}`);
-    }
+    await sendChannelMessage(targetId, "Ranked Hub reporting requires ten verified Ionia players. Use !inhouse and !ready after everyone is verified.");
     return;
   }
 
@@ -660,7 +650,7 @@ async function handleCommand(event, command, args) {
 
   if (command === "!cancel") {
     try {
-      await handleStatusCommand(event, "!cancel");
+      await handleStatusCommand(event, "!cancel", args);
     } catch (err) {
       const message = err.response?.data?.reply || err.response?.data?.message || err.message;
       await sendChannelMessage(targetId, `Command failed: ${message}`);
