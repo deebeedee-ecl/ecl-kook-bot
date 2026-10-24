@@ -576,7 +576,10 @@ async function handleRefreshCommand(event) {
   await sendChannelMessage(targetId, summary.join(" "));
 }
 
+const splitTwoBot=require('./split-ii.cjs').createSplitTwoAdapter({callEclApi,sendChannelMessage,getKookUserId,isAdminEvent,sendNotification:async(channelId,content)=>{const response=await axios.post(API_BASE+'/message/create',{type:1,target_id:channelId,content},{headers:getKookHeaders(),timeout:15000});return response.data?.code===0;}});
+
 async function handleCommand(event, command, args) {
+  if(command==='!split2'){await splitTwoBot.handle(event,args);return;}
   const targetId = event.target_id;
 
   if (command === "!ping") {
@@ -778,7 +781,7 @@ async function startBot() {
   });
 }
 
-startBot().catch((err) => {
+startBot().then(()=>splitTwoBot.start()).catch((err) => {
   console.error("Initial startBot error:", err.message);
   scheduleReconnect();
 });
