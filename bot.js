@@ -4,6 +4,11 @@ const WebSocket = require("ws");
 const axios = require("axios");
 const zlib = require("zlib");
 const crypto = require("crypto");
+const {
+  inhouseCommandErrorMessage,
+  kookApiResponseSucceeded,
+  shouldMoveInhousePlayers,
+} = require("./inhouse-flow.cjs");
 
 console.log("ECL info bot starting");
 
@@ -133,7 +138,7 @@ async function callEclApi(path, body) {
 
   const res = await axios.post(`${SITE_URL}${path}`, body, {
     headers: siteHeaders(),
-    timeout: 30000,
+    timeout: 60000,
   });
 
   return res.data;
@@ -189,11 +194,18 @@ async function moveVoiceUser(kookUserId, targetChannelId) {
 
   for (const payload of payloads) {
     try {
-      await axios.post(`${API_BASE}/channel/move-user`, payload, {
+      const response = await axios.post(`${API_BASE}/channel/move-user`, payload, {
         headers: getKookHeaders(),
         timeout: 15000,
       });
-      return true;
+
+      if (kookApiResponseSucceeded(response)) {
+        return true;
+      }
+
+      lastError = new Error(
+        response.data?.message || `KOOK move failed with code ${response.data?.code ?? "unknown"}.`,
+      );
     } catch (err) {
       lastError = err;
     }
@@ -463,7 +475,7 @@ async function handleInhouseCommand(event, command, forceAdmin = false) {
 
   await sendChannelMessage(event.target_id, data.reply || "Inhouse command completed.");
 
-  if ((command === "!ready" || command === "!forceready") && Array.isArray(data.moveInstructions)) {
+  if (shouldMoveInhousePlayers(command, data)) {
     const moveResults = await moveInhousePlayers(data.moveInstructions);
     const failed = moveResults.filter((result) => !result.ok);
 
@@ -631,7 +643,7 @@ async function handleCommand(event, command, args) {
     try {
       await handleInhouseCommand(event, command);
     } catch (err) {
-      const message = err.response?.data?.reply || err.response?.data?.message || err.message;
+      const message = inhouseCommandErrorMessage(err);
       await sendChannelMessage(targetId, `Inhouse command failed: ${message}`);
     }
     return;
